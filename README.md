@@ -34,7 +34,7 @@ Para lograr que esta experiencia cobrara vida en menos de una semana, se orquest
 ### 🎨 Arte 3D y Diseño Visual
 *   **Meshy:** Generación y modelado de los assets 3D (el Trono de Rosas, el Pastel, el Candelabro, etc.).
 *   **Mixamo:** Rigging de personajes y captura de movimiento para dotar de vida la vasta biblioteca de animaciones de baile.
-*   **PhotoScape:** Edición exhaustiva, refinamiento y rediseño de las texturas (difusas, metálicas, mapas de normal y emisión) para lograr el aspecto visual ultra-realista y mágico.
+*   **PhotoScape:** Edición exhaustiva, refinamiento y rediseño de las texturas (difusas, metálicas, mapas de normal y emisión) para lograr el aspecto visual realista y mágico.
 *   **Wondershare Filmora:** Edición de video y producción de material audiovisual complementario de la experiencia.
 
 ### 💻 Desarrollo e Ingeniería
