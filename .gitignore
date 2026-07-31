@@ -1,0 +1,14 @@
+node_modules/
+backups/
+*_backup.*
+check*.js
+count_braces.js
+extract.js
+fix*.js
+patch*.js
+optimize*.js
+add_glitter.js
+apply_fixes.js
+gas_version/patch_*.js
+.env
+.DS_Store

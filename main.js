@@ -1,0 +1,3283 @@
+import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
+import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { Reflector } from 'three/examples/jsm/objects/Reflector.js';
+import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+import { VignetteShader } from 'three/examples/jsm/shaders/VignetteShader.js';
+
+// --- Recorder AudioContext (para grabar video con audio sin necesidad de que la música esté sonando) ---
+let _recordAudioCtx = null;
+let _recordAudioDest = null;
+let _recordAudioSrc = null;
+let loadGeneration  = 0;
+
+// Setup Scene
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+
+// ── Iluminación festiva y suave para 15 Años ──────────────────────────────
+// La clave para que los polígonos no se marquen: luz envolvente que viene
+// de TODAS las direcciones (HemisphereLight) en vez de focos duros
+// que crean sombras en cada borde de polígono.
+
+// Hemisferio: luz cálida del cielo / tono mágico del suelo
+// Intensidad muy baja para un ambiente nocturno y de discoteca
+const hemiLight = new THREE.HemisphereLight(0xffd6f0, 0x8833aa, 0.25);
+scene.add(hemiLight);
+
+// Luz ambiental general (casi nula, solo para no tener negros 100% puros)
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.15);
+scene.add(ambientLight);
+
+// ── Niebla Volumétrica Atmosférica ──
+// Oscurece las esquinas y el fondo del cuarto, dando una vibra nocturna
+scene.fog = new THREE.FogExp2(0x110022, 0.02);
+
+// Luces festivas de color suaves (PointLight = luz omnidireccional, no crea
+// sombras duras en bordes de polígonos como las DirectionalLight)
+const rimLight1 = new THREE.PointLight(0xff55aa, 2.0, 90);  // Rosa/Fucsia
+rimLight1.position.set(12, 8, 0);
+scene.add(rimLight1);
+
+const rimLight2 = new THREE.PointLight(0xffcc44, 2.0, 90);  // Dorado festivo
+rimLight2.position.set(-12, 8, -10);
+scene.add(rimLight2);
+
+const rimLight3 = new THREE.PointLight(0x88aaff, 1.5, 80);  // Azul mágico
+rimLight3.position.set(0, 10, 15);
+scene.add(rimLight3);
+
+// ── Luz de Rebote del Suelo (Bounce Light) ──
+// Esta luz viene desde abajo (Y=-20) apuntando hacia arriba (Y=10)
+// Simula cómo la luz principal rebota en el suelo y pinta la parte inferior de los objetos
+const bounceLight = new THREE.DirectionalLight(0xffaadd, 0.8); // Aumentada para iluminar a Glaymar sin lavar el fondo
+bounceLight.position.set(0, -20, 0);
+bounceLight.target.position.set(0, 10, 0);
+scene.add(bounceLight);
+scene.add(bounceLight.target);
+
+// Luz principal para sombras — UNA sola, suave, desde arriba-frente
+// Bajamos mucho su intensidad para simular la luz de la luna o ambiente nocturno
+const shadowLight = new THREE.DirectionalLight(0xfff5e0, 0.6); 
+shadowLight.position.set(0, 40, 20);
+shadowLight.target.position.set(0, -10, -15);
+shadowLight.castShadow = true;
+shadowLight.shadow.mapSize.width  = 2048;
+shadowLight.shadow.mapSize.height = 2048;
+shadowLight.shadow.camera.near = 1;
+shadowLight.shadow.camera.far  = 150;
+// Ampliamos el área de captura de sombras para asegurar que cubra toda la sala
+shadowLight.shadow.camera.left  = -50;
+shadowLight.shadow.camera.right  =  50;
+shadowLight.shadow.camera.top    =  50;
+shadowLight.shadow.camera.bottom = -50;
+shadowLight.shadow.radius = 4; // Suaviza el borde de la sombra
+shadowLight.shadow.bias = -0.001; // Evita artefactos de "shadow acne"
+scene.add(shadowLight);
+scene.add(shadowLight.target);
+
+// ── LUZ FRONTAL EXCLUSIVA PARA EL MODELO ──
+// Un foco posicionado muy cerca del modelo con una 'distance' matemáticamente calculada
+// para que su luz "muera" antes de tocar las paredes o el suelo.
+const frontLight = new THREE.SpotLight(0xffeedd, 4.5); 
+frontLight.position.set(0, -3, 3); // A 8 metros enfrente de su pecho (ella está en z=-5, y=-10, pecho y=-3)
+frontLight.target.position.set(0, -3, -5); // Apuntando directo a su cara/pecho
+frontLight.distance = 12; // La luz viaja 12 metros, muriendo en Z=-9 (muy lejos de la pared de fondo)
+frontLight.decay = 0; // Desactiva la pérdida física de luz por distancia (brillará al máximo hasta morir)
+frontLight.angle = Math.PI / 4; // Cono un poco más ancho para cubrir el vestido
+frontLight.penumbra = 1.0;
+scene.add(frontLight);
+scene.add(frontLight.target);
+
+// ── LUZ SUPERIOR EXCLUSIVA PARA EL MODELO ──
+// Foco desde arriba, cortado antes de llegar al suelo.
+const topLight = new THREE.SpotLight(0xffffff, 8.0);
+topLight.position.set(0, 5, -5); // 10 metros directamente sobre su cabeza
+topLight.target.position.set(0, -5, -5); // Apuntando hacia abajo
+topLight.distance = 12; // Muere en Y=-7 (el suelo está en Y=-10, así que no ilumina el suelo)
+topLight.decay = 0; // Desactiva la pérdida física de luz por distancia
+topLight.angle = Math.PI / 4;
+topLight.penumbra = 1.0;
+scene.add(topLight);
+scene.add(topLight.target);
+
+// Setup Camera
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.set(0, -4, 5); // Initialize at shoulder height, looking forward
+
+// ─── DETECCIÓN DE NIVEL DE CALIDAD ───────────────────────────────────────────
+// Determina automáticamente el perfil de rendimiento según el dispositivo.
+// El usuario no necesita hacer nada; el código elige el nivel correcto solo.
+const _ua = navigator.userAgent;
+const _isMobilePhone = /Mobi|Android(?!.*Tablet)|iPhone/i.test(_ua) && window.innerWidth < 900;
+const _isTablet      = /iPad|Android.*Tablet|Tablet/i.test(_ua)
+                    || (/Android/i.test(_ua) && !_isMobilePhone);
+// qualityLevel: 'low' | 'medium' | 'high'
+// 'high' para PC con GPU dedicada, se confirma después de crear el renderer
+let qualityLevel = _isMobilePhone ? 'low' : (_isTablet ? 'medium' : 'high');
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Setup Renderer
+const renderer = new THREE.WebGLRenderer({ antialias: qualityLevel === 'high' });
+renderer.setSize(window.innerWidth, window.innerHeight);
+// Activar ToneMapping cinemático para luces más realistas
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+
+// En PC verificamos si la GPU es integrada (maxTextureSize < 8192 es típico de GPUs integradas)
+// Esto solo aplica si ya no es móvil ni tablet
+if (qualityLevel === 'high' && renderer.capabilities.maxTextureSize < 8192) {
+    qualityLevel = 'medium';
+}
+console.log('[Quality] Nivel detectado:', qualityLevel);
+
+// Pixel Ratio adaptativo: en móvil usamos 1.0, en tablet 1.5, en PC el máximo de 2
+const _dpr = qualityLevel === 'low' ? 1.0 : (qualityLevel === 'medium' ? Math.min(window.devicePixelRatio, 1.5) : Math.min(window.devicePixelRatio, 2));
+renderer.setPixelRatio(_dpr);
+
+// Sombras: PCFSoft 2048 en High, Basic 1024 en Medium, desactivadas en Low
+if (qualityLevel === 'low') {
+    renderer.shadowMap.enabled = false;
+} else if (qualityLevel === 'medium') {
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.BasicShadowMap;
+    shadowLight.shadow.mapSize.width  = 1024;
+    shadowLight.shadow.mapSize.height = 1024;
+} else {
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+}
+document.body.appendChild(renderer.domElement);
+
+// Post-Processing (Bloom y AA) — adaptativo según calidad
+const renderScene = new RenderPass(scene, camera);
+const composer = new EffectComposer(renderer);
+composer.addPass(renderScene);
+
+if (qualityLevel !== 'low') {
+    // Viñeteado cinemático: solo en Medium y High
+    const vignettePass = new ShaderPass(VignetteShader);
+    vignettePass.uniforms['offset'].value = 1.5;
+    vignettePass.uniforms['darkness'].value = 1.0;
+    composer.addPass(vignettePass);
+}
+
+if (qualityLevel === 'high') {
+    // SMAA: solo en High (muy pesado en GPU integrada y móvil)
+    const smaaPass = new SMAAPass(window.innerWidth * renderer.getPixelRatio(), window.innerHeight * renderer.getPixelRatio());
+    composer.addPass(smaaPass);
+}
+
+// Bloom: Full en High, reducido en Medium, desactivado en Low
+const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+if (qualityLevel === 'high') {
+    bloomPass.threshold = 0.9;
+    bloomPass.strength  = 0.2;
+    bloomPass.radius    = 0.5;
+    composer.addPass(bloomPass);
+} else if (qualityLevel === 'medium') {
+    bloomPass.threshold = 0.95;
+    bloomPass.strength  = 0.08;
+    bloomPass.radius    = 0.3;
+    composer.addPass(bloomPass);
+}
+// En 'low' no se añade bloomPass al composer
+
+// Controls
+const candelabraMaterials = [];
+const cakeMaterials = [];
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.05;
+controls.target.set(0, -4, -5); // Target character's shoulder height in the center of the room
+controls.maxPolarAngle = Math.PI / 2 - 0.02; // Evitar que la cámara se hunda por debajo del suelo
+controls.maxDistance = 25; // Limitar el zoom máximo
+
+// Loading Manager
+const loadingManager = new THREE.LoadingManager();
+const progressBar = document.getElementById('progress-bar');
+const loadingText = document.getElementById('loading-text');
+const loadingScreen = document.getElementById('loading-screen');
+const uiMenu = document.getElementById('ui-menu');
+const loadingSlideshow1 = document.getElementById('loading-slideshow-1');
+const loadingSlideshow2 = document.getElementById('loading-slideshow-2');
+let loadingSlideshowInterval = null;
+
+// Arrancamos un pase de diapositivas en la pantalla de carga de inmediato
+fetch('/api/photos')
+    .then(res => res.json())
+    .then(photos => {
+        if (photos.length > 0 && loadingSlideshow1 && loadingSlideshow2) {
+            let currentBg = loadingSlideshow1;
+            let nextBg = loadingSlideshow2;
+            let idx = 0;
+            let nextIdx = (idx + 1) % photos.length;
+            
+            // Inicializar las dos primeras imágenes
+            currentBg.style.backgroundImage = `url('./Fotos/${photos[idx]}')`;
+            currentBg.classList.add('active');
+            nextBg.style.backgroundImage = `url('./Fotos/${photos[nextIdx]}')`;
+            
+            loadingSlideshowInterval = setInterval(() => {
+                // Intercambiar visibilidad
+                nextBg.classList.add('active');
+                currentBg.classList.remove('active');
+                
+                // Rotar variables
+                let temp = currentBg;
+                currentBg = nextBg;
+                nextBg = temp;
+                
+                // Preparar la siguiente foto en el div que se acaba de ocultar (con retraso para no cortar la transición)
+                nextIdx = (nextIdx + 1) % photos.length;
+                setTimeout(() => {
+                    loadDriveAssetAsBlob("Fotos/" + photos[nextIdx]).then(url => { nextBg.style.backgroundImage = "url('" + url + "')"; }).catch(console.error);
+                }, 1500); 
+
+            }, 3000); // Cambia cada 3s
+        }
+    })
+    .catch(err => console.log('No se pudieron cargar las fotos para el loading', err));
+
+loadingManager.onProgress = function(url, itemsLoaded, itemsTotal) {
+    const progress = (itemsLoaded / itemsTotal) * 100;
+    progressBar.style.width = progress + '%';
+    const phrases = [
+        "Armando el salón de fiesta...",
+        "Colocando las luces...",
+        "Preparando el pastel...",
+        "Puliendo la pista de baile...",
+        "Afinando la música...",
+        "Lluvia de rosas en camino...",
+        "¡Casi listos para los 15!"
+    ];
+    const phraseIndex = Math.min(Math.floor((itemsLoaded / itemsTotal) * phrases.length), phrases.length - 1);
+    loadingText.innerText = `${phrases[phraseIndex]} ${Math.floor(progress)}%`;
+};
+
+let loadingTimerInterval = null;
+let loadingStartTime = Date.now();
+const loadingTimerEl = document.getElementById("loading-timer");
+loadingTimerInterval = setInterval(() => {
+    if (loadingTimerEl) {
+        const totalSec = Math.floor((Date.now() - loadingStartTime) / 1000);
+        const mins = Math.floor(totalSec / 60);
+        const secs = totalSec % 60;
+        const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+        loadingTimerEl.textContent = `Tiempo de carga: ${timeStr}`;
+    }
+}, 1000);
+
+let initialLoadComplete = false;
+loadingManager.onLoad = function() {
+    if (initialLoadComplete) return;
+    initialLoadComplete = true;
+    if (loadingTimerInterval) clearInterval(loadingTimerInterval);
+    // PRECALENTAMIENTO DE GPU (GPU WARMUP):
+    // En lugar de solo compilar shaders, forzamos un renderizado real de la escena 
+    // mientras la pantalla de carga sigue negra. Esto obliga a la tarjeta gráfica a 
+    // subir todas las texturas pesadas a la VRAM y evaluar todos los huesos de animación.
+    // Gira la cámara virtualmente para "mirar" toda la escena y forzar el renderizado.
+    const oldPos = camera.position.clone();
+    camera.position.set(0, 5, 20); // Miramos desde lejos
+    camera.lookAt(0, 5, 0);
+    
+    // Forzamos compilación de variantes transparentes (evita bajones de FPS en transiciones)
+    if (character) character.traverse(child => { 
+        if(child.isMesh && child.material) {
+            child.material.userData.warmupOriginalTransparent = child.material.transparent;
+            child.material.transparent = true;
+            child.material.needsUpdate = true;
+        } 
+    });
+    if (typeof skirtMesh !== 'undefined' && skirtMesh) {
+        skirtMesh.material.userData.warmupOriginalTransparent = skirtMesh.material.transparent;
+        skirtMesh.material.transparent = true;
+        skirtMesh.material.needsUpdate = true;
+    }
+    if (typeof modestyCap !== 'undefined' && modestyCap) {
+        modestyCap.material.userData.warmupOriginalTransparent = modestyCap.material.transparent;
+        modestyCap.material.transparent = true;
+        modestyCap.material.needsUpdate = true;
+    }
+    
+    renderer.compile(scene, camera); // Obligamos a compilar TODOS los shaders antes de arrancar
+    composer.render(); // Render forzado (sube texturas a VRAM)
+    
+    // Restauramos estados
+    if (character) character.traverse(child => { 
+        if(child.isMesh && child.material) {
+            child.material.transparent = child.material.userData.warmupOriginalTransparent;
+            child.material.needsUpdate = true;
+        }
+    });
+    if (typeof skirtMesh !== 'undefined' && skirtMesh) {
+        skirtMesh.material.transparent = skirtMesh.material.userData.warmupOriginalTransparent;
+        skirtMesh.material.needsUpdate = true;
+    }
+    if (typeof modestyCap !== 'undefined' && modestyCap) {
+        modestyCap.material.transparent = modestyCap.material.userData.warmupOriginalTransparent;
+        modestyCap.material.needsUpdate = true;
+    }
+    
+    camera.position.copy(oldPos); // Restauramos la cámara a donde estaba
+    
+    loadingScreen.style.opacity = '0';
+    setTimeout(() => {
+        loadingScreen.style.display = 'none';
+        
+        const tutorial = document.getElementById('tutorial-overlay');
+        const btnStartTut = document.getElementById('btn-start-tutorial');
+        
+        if (tutorial && btnStartTut) {
+            tutorial.style.display = 'flex';
+            // slight delay to apply opacity transition
+            setTimeout(() => { tutorial.style.opacity = '1'; }, 50);
+            
+            btnStartTut.addEventListener('click', () => {
+                tutorial.style.opacity = '0';
+                setTimeout(() => {
+                    tutorial.style.display = 'none';
+                    uiMenu.style.display = 'block';
+                    const topBtnBar = document.getElementById('top-btn-bar');
+                    if (topBtnBar) topBtnBar.style.display = 'flex';
+                }, 500);
+            }, {once: true});
+        } else {
+            uiMenu.style.display = 'block';
+            const topBtnBar = document.getElementById('top-btn-bar');
+            if (topBtnBar) topBtnBar.style.display = 'flex';
+        }
+
+        if (loadingSlideshowInterval) {
+            clearInterval(loadingSlideshowInterval);
+        }
+    }, 1000);
+};
+
+// Texture Loader
+const textureLoader = new THREE.TextureLoader(loadingManager);
+
+// Load Textures
+const wallTexture = textureLoader.load('./Textura pared.png');
+const floorTexture = textureLoader.load('./Textura Suelo.png');
+const ceilingTexture = textureLoader.load('./Textuta techo.png');
+
+// Adjust texture encoding and wrap settings
+const textures = [wallTexture, floorTexture, ceilingTexture];
+textures.forEach(tex => {
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+});
+
+// Define room dimensions
+const roomWidth = 30;
+const roomHeight = 20;
+const roomDepth = 50; // Making the room longer
+
+// Clone textures to adjust repeats independently for each face to avoid stretching
+const sideWallTex = wallTexture.clone();
+sideWallTex.repeat.set(roomDepth / roomHeight, 1);
+
+const frontWallTex = wallTexture.clone();
+frontWallTex.repeat.set(roomWidth / roomHeight, 1);
+
+const floorTex = floorTexture.clone();
+// Set horizontal repeat to 1 so the red carpet only appears once in the middle.
+// We repeat it along the depth to keep the tiles square.
+floorTex.repeat.set(1, roomDepth / roomWidth);
+
+const ceilingTex = ceilingTexture.clone();
+// Match ceiling to floor so it looks consistent
+ceilingTex.repeat.set(1, roomDepth / roomWidth);
+
+// Materials for Box (Order: px, nx, py, ny, pz, nz)
+// px: right wall, nx: left wall, py: ceiling, ny: floor, pz: front wall, nz: back wall
+const materials = [
+    new THREE.MeshLambertMaterial({ map: sideWallTex, side: THREE.BackSide }), // Right
+    new THREE.MeshLambertMaterial({ map: sideWallTex, side: THREE.BackSide }), // Left
+    new THREE.MeshLambertMaterial({ map: ceilingTex, side: THREE.BackSide }), // Top (Ceiling)
+    new THREE.MeshLambertMaterial({ map: floorTex, side: THREE.BackSide }), // Bottom (Floor)
+    new THREE.MeshLambertMaterial({ map: frontWallTex, side: THREE.BackSide }), // Front
+    new THREE.MeshLambertMaterial({ map: frontWallTex, side: THREE.BackSide }), // Back
+];
+
+// Create Rectangular Room
+const roomGeometry = new THREE.BoxGeometry(roomWidth, roomHeight, roomDepth);
+const room = new THREE.Mesh(roomGeometry, materials);
+// Shift it slightly so the floor is at y = -10
+room.position.y = 0;
+scene.add(room);
+room.receiveShadow = true; // El suelo y paredes reciben las sombras
+
+// Añadir marco decorativo en la pared trasera (detrás del trono)
+const marcoTexture = textureLoader.load('./Marco/Marco.png');
+marcoTexture.colorSpace = THREE.SRGBColorSpace;
+const marcoGeo = new THREE.PlaneGeometry(roomWidth, roomHeight);
+const marcoMat = new THREE.MeshStandardMaterial({
+    map: marcoTexture,
+    transparent: true,
+    alphaTest: 0.1,
+    side: THREE.FrontSide,
+    roughness: 0.2, // Superficie pulida para reflejar luces
+    metalness: 0.8, // Aspecto metálico (resalta el dorado)
+    emissive: new THREE.Color(0xffffff), // Brillo neutro sin tinte dorado
+    emissiveMap: marcoTexture, // Solo brilla donde hay dibujo/texto
+    emissiveIntensity: 0.5 // Hace que resalte y el UnrealBloomPass lo haga "brillar"
+});
+const marcoMesh = new THREE.Mesh(marcoGeo, marcoMat);
+marcoMesh.position.set(0, 0, -24.9); // Pegado a la pared trasera
+scene.add(marcoMesh);
+
+// Reflejo del suelo — adaptativo según calidad
+const mirrorGeo = new THREE.PlaneGeometry(roomWidth, roomDepth);
+let floorMirror; // guardamos referencia para rotarlo en resize si necesario
+
+if (qualityLevel === 'low') {
+    // En móvil: material simple con la textura del suelo visible
+    const simpleMirrorMat = new THREE.MeshStandardMaterial({
+        map: floorTexture,
+        roughness: 0.6,
+        metalness: 0.3,
+    });
+    floorMirror = new THREE.Mesh(mirrorGeo, simpleMirrorMat);
+} else {
+    // En Medium y High: Reflector real
+    const mirrorResW = qualityLevel === 'medium' ? 512 : window.innerWidth  * window.devicePixelRatio;
+    const mirrorResH = qualityLevel === 'medium' ? 512 : window.innerHeight * window.devicePixelRatio;
+    const mirror = new Reflector(mirrorGeo, {
+        clipBias: 0.003,
+        textureWidth:  mirrorResW,
+        textureHeight: mirrorResH,
+        color: 0xcccccc
+    });
+    mirror.material.transparent = true;
+    mirror.material.uniforms.opacity = { value: 0.25 };
+    mirror.material.fragmentShader = `uniform float opacity;\n` + mirror.material.fragmentShader.replace(
+        'gl_FragColor = vec4( blendOverlay( base.rgb, color ), 1.0 );',
+        'gl_FragColor = vec4( blendOverlay( base.rgb, color ), opacity );'
+    );
+    floorMirror = mirror;
+}
+
+floorMirror.position.y = -9.98;
+floorMirror.rotation.x = -Math.PI / 2;
+scene.add(floorMirror);
+
+// Load FBX Model (Altar)
+const fbxLoader = new FBXLoader(loadingManager);
+let throneObjGlobal = null;
+let cakeObjGlobal = null;
+let photoMeshGlobal = null;
+let discoBall = null;
+let character = null;
+
+const glitterMaterials = []; // Almacena todos los materiales de purpurina para actualizar su uTime
+
+// Función inyectora de Shaders global para hacer que cualquier purpurina titile
+const injectTwinkle = (shader, material) => {
+    shader.uniforms.uTime = { value: 0 };
+    material.userData.shader = shader; // Guardamos referencia para actualizar uTime
+    
+    shader.vertexShader = `
+        uniform float uTime;
+        varying float vTwinkle;
+        ${shader.vertexShader}
+    `.replace(
+        `#include <project_vertex>`,
+        `#include <project_vertex>
+        vec4 worldPos = modelMatrix * vec4( transformed, 1.0 );
+        vec3 viewDir = normalize(cameraPosition - worldPos.xyz);
+        // Ruido matemático extremo basado en la cámara y la posición física
+        float dotVal = dot(worldPos.xyz, viewDir) * 100.0;
+        // Función seno de alta frecuencia combinada con el tiempo
+        float sparkle = sin(dotVal + uTime * 5.0) * 0.5 + 0.5;
+        // Elevamos a una potencia alta para que solo los picos más extremos "destellen"
+        sparkle = pow(sparkle, 20.0); 
+        vTwinkle = sparkle;
+        // Hacer que la partícula se agrande físicamente durante el destello
+        gl_PointSize = gl_PointSize * (0.3 + sparkle * 2.5);
+        `
+    );
+    
+    shader.fragmentShader = `
+        varying float vTwinkle;
+        ${shader.fragmentShader}
+    `.replace(
+        `#include <color_fragment>`,
+        `#include <color_fragment>
+        // Multiplicamos intensamente el color nativo para que parezca luz emisiva
+        diffuseColor.rgb += diffuseColor.rgb * (vTwinkle * 5.0);
+        `
+    );
+};
+fbxLoader.load('./Glaymar_Three_Tier_Al_0724203913_image-to-3d-texture_fbx/Glaymar_Three_Tier_Al_0724203913_image-to-3d-texture.fbx', (object) => {
+    const box = new THREE.Box3().setFromObject(object);
+    const size = box.getSize(new THREE.Vector3());
+    
+    // Target width of 16 units to make it wide
+    const scaleFactor = 16 / size.x;
+    
+    // Scale: wide, short (bajito), proportional depth
+    object.scale.set(scaleFactor, scaleFactor * 0.3, scaleFactor * 0.8);
+    
+    // Position it at one end (e.g., Z = -20)
+    object.position.set(0, 0, -20); 
+    object.updateMatrixWorld();
+    
+    // Adjust Y so its lowest point sits on the floor (which is at Y = -10)
+    const finalBox = new THREE.Box3().setFromObject(object);
+    object.position.y += (-10 - finalBox.min.y);
+    
+    scene.add(object);
+    // El altar proyecta sombra y la recibe
+    object.traverse((child) => {
+        if (child.isMesh) {
+            child.castShadow    = true;
+            child.receiveShadow = true;
+        }
+    });
+
+    // Load Throne and place it on top of the altar
+    fbxLoader.load('./Glaymar_Rose_Throne_0724194627_image-to-3d-texture_fbx/Glaymar_Rose_Throne_0724194627_image-to-3d-texture.fbx', (throneObj) => {
+        throneObjGlobal = throneObj;
+        const throneBox = new THREE.Box3().setFromObject(throneObj);
+        const throneSize = throneBox.getSize(new THREE.Vector3());
+        
+        // Scale the throne (e.g. 8 units wide)
+        const throneScale = 8 / throneSize.x;
+        throneObj.scale.set(throneScale, throneScale, throneScale);
+        
+        // Position it at the same Z as the altar
+        throneObj.position.set(0, 0, -20);
+        throneObj.updateMatrixWorld();
+        
+        const scaledThroneBox = new THREE.Box3().setFromObject(throneObj);
+        
+        // The altar was moved after finalBox was calculated, so we must calculate its actual top in the scene
+        object.updateMatrixWorld();
+        const actualAltarBox = new THREE.Box3().setFromObject(object);
+        
+        // Adjust Y so the throne's bottom sits exactly on the altar's actual top
+        throneObj.position.y += (actualAltarBox.max.y - scaledThroneBox.min.y);
+        
+        scene.add(throneObj);
+        // El trono proyecta sombra y la recibe
+        throneObj.traverse((child) => {
+            if (child.isMesh) {
+                child.castShadow    = true;
+                child.receiveShadow = true;
+            }
+        });
+    }, undefined, (error) => {
+        console.error('Error loading throne:', error);
+    });
+
+}, undefined, (error) => {
+    console.error('Error loading altar:', error);
+});
+
+// Load FBX Model (Balloons)
+fbxLoader.load('./Glaymar_Balloon_Bouqu_0724200050_image-to-3d-texture_fbx/Glaymar_Balloon_Bouqu_0724200050_image-to-3d-texture.fbx', (object) => {
+    const box = new THREE.Box3().setFromObject(object);
+    const size = box.getSize(new THREE.Vector3());
+    
+    // Scale the balloons (e.g., 10 units high)
+    const scaleFactor = 10 / size.y;
+    object.scale.set(scaleFactor, scaleFactor, scaleFactor);
+    
+    // Padding from the walls
+    const paddingX = 2;
+    const paddingZ = 2;
+    
+    const xLimit = (roomWidth / 2) - paddingX;
+    const zLimit = (roomDepth / 2) - paddingZ;
+    
+    const positions = [
+        // 4 corners
+        { x: xLimit, z: zLimit },
+        { x: -xLimit, z: zLimit },
+        { x: xLimit, z: -zLimit },
+        { x: -xLimit, z: -zLimit },
+        // middles of side walls
+        { x: xLimit, z: 0 },
+        { x: -xLimit, z: 0 }
+    ];
+    
+    positions.forEach(pos => {
+        const balloon = object.clone();
+        balloon.position.set(pos.x, 0, pos.z);
+        balloon.updateMatrixWorld();
+        
+        // Adjust Y so the balloons sit on the floor (-10)
+        const bBox = new THREE.Box3().setFromObject(balloon);
+        balloon.position.y += (-10 - bBox.min.y);
+        
+        scene.add(balloon);
+        balloon.traverse((child) => {
+            if (child.isMesh) {
+                child.castShadow    = true;
+                child.receiveShadow = true;
+                
+                // Agregar purpurina al globo (solo ~50% de los vértices para no saturar)
+                const originalPositions = child.geometry.attributes.position;
+                const totalVertices = originalPositions.count;
+                
+                const positions = [];
+                const colors = [];
+                
+                for(let i=0; i<totalVertices; i++) {
+                    // Seleccionar un extremo 1% de los vértices (apenas unos destellos)
+                    if (Math.random() < 0.01) {
+                        const x = originalPositions.getX(i);
+                        const y = originalPositions.getY(i);
+                        const z = originalPositions.getZ(i);
+                        const len = Math.sqrt(x*x + y*y + z*z) || 1;
+                        
+                        // Empujar ligeramente hacia afuera para que la purpurina flote sobre el globo
+                        positions.push(x + (x/len)*0.02, y + (y/len)*0.02, z + (z/len)*0.02);
+                        
+                        const c = new THREE.Color().setHSL(Math.random(), 1.0, 0.5); 
+                        colors.push(c.r, c.g, c.b);
+                    }
+                }
+                
+                const balloonGeo = new THREE.BufferGeometry();
+                balloonGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+                balloonGeo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+                
+                const balMat = new THREE.PointsMaterial({
+                    size: 0.015,
+                    vertexColors: true,
+                    transparent: false,
+                    depthWrite: true
+                });
+                balMat.onBeforeCompile = (shader) => injectTwinkle(shader, balMat);
+                glitterMaterials.push(balMat);
+                
+                const balPoints = new THREE.Points(balloonGeo, balMat);
+                child.add(balPoints);
+            }
+        });
+    });
+    
+}, undefined, (error) => {
+    console.error('Error loading balloons:', error);
+});
+
+// Load FBX Model (Candelabras)
+fbxLoader.load('./Glaymar_Gold_Candelab_0724200941_image-to-3d-texture_fbx/Glaymar_Gold_Candelab_0724200941_image-to-3d-texture.fbx', (object) => {
+    const box = new THREE.Box3().setFromObject(object);
+    const size = box.getSize(new THREE.Vector3());
+    
+    // Scale the candelabras (e.g., 6 units high)
+    const scaleFactor = 6 / size.y;
+    object.scale.set(scaleFactor, scaleFactor, scaleFactor);
+    
+    const candelabraPositions = [
+        // 4 on left long wall (X = -13.5)
+        { x: -13.5, z: -15 }, { x: -13.5, z: -5 }, { x: -13.5, z: 5 }, { x: -13.5, z: 15 },
+        // 4 on right long wall (X = 13.5)
+        { x: 13.5, z: -15 }, { x: 13.5, z: -5 }, { x: 13.5, z: 5 }, { x: 13.5, z: 15 },
+        // 2 next to the throne (Throne is at Z=-20. Altar is 16 wide, so X=-9 and X=9)
+        { x: -9, z: -20 }, { x: 9, z: -20 },
+        // 2 on the back wall (Behind the altar, near Z=-23.5)
+        { x: -8, z: -23.5 }, { x: 8, z: -23.5 }
+    ];
+    
+    candelabraPositions.forEach(pos => {
+        const candelabra = object.clone();
+        candelabra.position.set(pos.x, 0, pos.z);
+        candelabra.updateMatrixWorld();
+        
+        // Adjust Y so the candelabras sit on the floor (-10)
+        const cBox = new THREE.Box3().setFromObject(candelabra);
+        candelabra.position.y += (-10 - cBox.min.y);
+        
+        scene.add(candelabra);
+        candelabra.traverse((child) => {
+            if (child.isMesh) {
+                child.castShadow    = true;
+                child.receiveShadow = true;
+                
+                // Shader para convertir las puntas altas en NEÓN (Fuego) basado en la altura
+                candelabraMaterials.push(child.material);
+                child.material.onBeforeCompile = function(shader) {
+                    shader.uniforms.uTime = { value: 0 };
+                    child.material.userData.shader = shader;
+                    
+                    // Inyectar varying para la posición Y en el mundo
+                    shader.vertexShader = shader.vertexShader.replace(
+                        '#include <common>',
+                        `
+                        #include <common>
+                        varying float vWorldY;
+                        `
+                    );
+                    shader.vertexShader = shader.vertexShader.replace(
+                        '#include <project_vertex>',
+                        `
+                        #include <project_vertex>
+                        vec4 myWorldPos = modelMatrix * vec4(transformed, 1.0);
+                        vWorldY = myWorldPos.y;
+                        `
+                    );
+
+                    shader.fragmentShader = shader.fragmentShader.replace(
+                        '#include <common>',
+                        `
+                        #include <common>
+                        uniform float uTime;
+                        varying float vWorldY;
+                        `
+                    );
+                    
+                    // Inyectar fuego/neon al final del shader
+                    shader.fragmentShader = shader.fragmentShader.replace(
+                        '#include <dithering_fragment>',
+                        `
+                        // El candelabro mide 6 unidades de alto y su base está en Y = -10.
+                        // Por tanto, la cima está en Y = -4.
+                        // Las velas ocupan aprox el último metro (Y > -5.0).
+                        
+                        if (vWorldY > -5.2) { 
+                            // Factor de intensidad: 0 en la base de la vela, 1 en la punta
+                            float fireIntensity = smoothstep(-5.2, -4.0, vWorldY);
+                            
+                            // Titileo dinámico
+                            float flicker = 0.7 + 0.3 * sin(uTime * 20.0 + vWorldY * 10.0);
+                            
+                            // Color del fuego (Naranja brillante)
+                            vec3 fireColor = vec3(1.0, 0.4, 0.0) * 15.0 * flicker * fireIntensity;
+                            
+                            // Añadimos núcleo blanco hiper-brillante en la mismísima punta (Y > -4.3)
+                            float whiteCore = smoothstep(-4.5, -4.0, vWorldY);
+                            fireColor += vec3(1.0, 1.0, 0.8) * 30.0 * flicker * whiteCore;
+                            
+                            gl_FragColor.rgb += fireColor;
+                        }
+                        
+                        #include <dithering_fragment>
+                        `
+                    );
+                };
+            }
+        });
+    });
+    
+}, undefined, (error) => {
+    console.error('Error loading candelabras:', error);
+});
+
+// Load FBX Model (Cake)
+fbxLoader.load('./Glaymar_Quinceanera_Cake_0724195337_image-to-3d-texture_fbx/Glaymar_Quinceanera_C_0724195337_image-to-3d-texture.fbx', (object) => {
+    const box = new THREE.Box3().setFromObject(object);
+    const size = box.getSize(new THREE.Vector3());
+    
+    // Scale the cake (e.g., 6 units high)
+    const scaleFactor = 6 / size.y;
+    object.scale.set(scaleFactor, scaleFactor, scaleFactor);
+    
+    // Position it to the side of the altar/throne
+    // The altar is between X = -8 and 8, so X = 10 places it safely to the right.
+    object.position.set(10, 0, -8);
+    // Girar hacia la derecha (90 grados) para que mire de frente
+    object.rotation.y = -Math.PI / 2;
+    object.updateMatrixWorld();
+    
+    // Adjust Y so the cake sits on the floor (-10)
+    const cBox = new THREE.Box3().setFromObject(object);
+    object.position.y += (-10 - cBox.min.y);
+    
+    scene.add(object);
+    cakeObjGlobal = object; // Guardar referencia global
+    object.traverse((child) => {
+        if (child.isMesh) {
+            child.castShadow    = true;
+            child.receiveShadow = true;
+            
+            if (child.material) {
+                const materials = Array.isArray(child.material) ? child.material : [child.material];
+                materials.forEach(mat => {
+                    mat.onBeforeCompile = (shader) => {
+                        shader.uniforms.uTime = { value: 0 };
+                        shader.vertexShader = shader.vertexShader.replace(
+                            '#include <common>',
+                            `
+                            #include <common>
+                            varying float vWorldY;
+                            `
+                        );
+                        
+                        shader.vertexShader = shader.vertexShader.replace(
+                            '#include <project_vertex>',
+                            `
+                            #include <project_vertex>
+                            vec4 myWorldPos = modelMatrix * vec4(transformed, 1.0);
+                            vWorldY = myWorldPos.y;
+                            `
+                        );
+                        
+                        shader.fragmentShader = shader.fragmentShader.replace(
+                            '#include <common>',
+                            `
+                            #include <common>
+                            uniform float uTime;
+                            varying float vWorldY;
+                            `
+                        );
+                        
+                        shader.fragmentShader = shader.fragmentShader.replace(
+                            '#include <dithering_fragment>',
+                            `
+                            // El pastel mide ~6 de alto y su base está en Y = -10.
+                            // Por tanto, la cima está aprox en Y = -4.
+                            if (vWorldY > -4.5) { 
+                                float fireIntensity = smoothstep(-4.5, -3.9, vWorldY);
+                                float flicker = 0.7 + 0.3 * sin(uTime * 20.0 + vWorldY * 10.0);
+                                vec3 fireColor = vec3(1.0, 0.4, 0.0) * 2.0 * flicker * fireIntensity;
+                                float whiteCore = smoothstep(-4.2, -3.9, vWorldY);
+                                fireColor += vec3(1.0, 1.0, 0.8) * 3.0 * flicker * whiteCore;
+                                gl_FragColor.rgb += fireColor;
+                            }
+                            #include <dithering_fragment>
+                            `
+                        );
+                        mat.userData.shader = shader;
+                    };
+                    cakeMaterials.push(mat);
+                });
+            }
+        }
+    });
+}, undefined, (error) => {
+    console.error('Error loading cake:', error);
+});
+
+// ── Bola de Discoteca ───────────────────────────────────────────────────────
+discoBall = new THREE.Group();
+// Se cuelga exactamente del techo en el centro del salón
+discoBall.position.set(0, 10, 0); 
+
+// El cable que la sostiene
+const stringGeo = new THREE.CylinderGeometry(0.02, 0.02, 4);
+const stringMat = new THREE.MeshBasicMaterial({ color: 0x222222 });
+const stringMesh = new THREE.Mesh(stringGeo, stringMat);
+stringMesh.position.y = -2; 
+discoBall.add(stringMesh);
+
+// ── Textura de Entorno Falsa (Chrome) ──
+// Generamos un mapa de entorno HDRI equirectangular programático LLENO de detalles (ruido/mosaico)
+// Esto hará que cada espejito de la bola refleje algo distinto, logrando el efecto metálico facetado.
+const envCanvas = document.createElement('canvas');
+envCanvas.width = 512;
+envCanvas.height = 256;
+const envCtx = envCanvas.getContext('2d');
+
+// Fondo base oscuro
+envCtx.fillStyle = '#111111';
+envCtx.fillRect(0, 0, 512, 256);
+
+// Dibujamos cientos de luces y contrastes aleatorios
+for (let i = 0; i < 500; i++) {
+    // Colores: Blanco puro, gris plata, gris oscuro, rosa intenso, dorado
+    const colors = ['#ffffff', '#aaaaaa', '#444444', '#ff55aa', '#ffcc44', '#111111'];
+    envCtx.fillStyle = colors[Math.floor(Math.random() * colors.length)];
+    
+    // Tamaños variados para crear un patrón de reflejos complejos
+    const x = Math.random() * 512;
+    const y = Math.random() * 256;
+    const w = Math.random() * 40 + 10;
+    const h = Math.random() * 40 + 10;
+    envCtx.fillRect(x, y, w, h);
+}
+
+const envTex = new THREE.CanvasTexture(envCanvas);
+envTex.mapping = THREE.EquirectangularReflectionMapping;
+
+// La esfera de espejos (Ahora sí es Cromo real)
+const discoGeo = new THREE.SphereGeometry(1.5, 32, 16); 
+const discoMat = new THREE.MeshStandardMaterial({
+    color: 0x999999, // Base plateada/gris oscura para que el metal se vea real
+    metalness: 1.0, // Cromo puro
+    roughness: 0.1, // Reflejo ligeramente rugoso
+    envMap: envTex,  // Refleja nuestro mapa lleno de ruido
+    envMapIntensity: 1.5, // Brillo metálico fuerte
+    flatShading: true // Espejos cuadrados
+});
+const discoMesh = new THREE.Mesh(discoGeo, discoMat);
+discoMesh.position.y = -4; 
+discoMesh.castShadow = true;
+discoBall.add(discoMesh);
+
+// ── Puntos de luz "Neón" Difuminados (Glow) ──
+// Generamos una textura de partículas con bordes muy difuminados (Soft Glow)
+const glowCanvas = document.createElement('canvas');
+glowCanvas.width = 64;
+glowCanvas.height = 64;
+const glowCtx = glowCanvas.getContext('2d');
+const glowGrad = glowCtx.createRadialGradient(32, 32, 0, 32, 32, 32);
+// Difuminado extremo: el centro ya no es brillante, todo es una niebla suave
+glowGrad.addColorStop(0, 'rgba(255,255,255,0.4)');
+glowGrad.addColorStop(0.3, 'rgba(255,255,255,0.2)');
+glowGrad.addColorStop(0.6, 'rgba(255,255,255,0.05)');
+glowGrad.addColorStop(1, 'rgba(255,255,255,0)');
+glowCtx.fillStyle = glowGrad;
+glowCtx.fillRect(0, 0, 64, 64);
+const glowTex = new THREE.CanvasTexture(glowCanvas);
+
+const reflectionsCount = 500;
+const refGeo = new THREE.BufferGeometry();
+const refPositions = new Float32Array(reflectionsCount * 3);
+const refColors = new Float32Array(reflectionsCount * 3);
+// Guardamos las direcciones base para calcular las intersecciones dinámicamente
+const rayDirs = []; 
+
+for(let i=0; i<reflectionsCount; i++) {
+    // Para evitar que se concentren en el techo (que está muy cerca de la bola),
+    // distribuimos los puntos aleatoriamente sobre las 6 caras de la habitación.
+    const face = Math.floor(Math.random() * 6);
+    let x, y, z;
+    // La bola está en y=6 (mundo). Techo: y=4, Suelo: y=-16
+    if (face === 0) { y = 4; x = (Math.random()-0.5)*30; z = (Math.random()-0.5)*50; } // Techo
+    else if (face === 1) { y = -16; x = (Math.random()-0.5)*30; z = (Math.random()-0.5)*50; } // Suelo
+    else if (face === 2) { x = -15; y = (Math.random()-0.5)*20 - 6; z = (Math.random()-0.5)*50; } // Izq
+    else if (face === 3) { x = 15; y = (Math.random()-0.5)*20 - 6; z = (Math.random()-0.5)*50; } // Der
+    else if (face === 4) { z = 25; x = (Math.random()-0.5)*30; y = (Math.random()-0.5)*20 - 6; } // Frontal
+    else if (face === 5) { z = -25; x = (Math.random()-0.5)*30; y = (Math.random()-0.5)*20 - 6; } // Trasera
+    
+    // Obtenemos la dirección desde el centro de la bola hacia ese punto en la pared
+    const vec = new THREE.Vector3(x, y, z).normalize();
+    rayDirs.push(vec);
+    
+    // Generar TODOS los colores del universo usando HSL
+    // Hue (Tono) aleatorio de 0 a 1, Saturación máxima (1),
+    // Brillo bajísimo (0.25) para que los colores sean profundos y no brillen como blanco
+    const col = new THREE.Color().setHSL(Math.random(), 1.0, 0.25);
+    refColors[i*3] = col.r;
+    refColors[i*3+1] = col.g;
+    refColors[i*3+2] = col.b;
+}
+refGeo.setAttribute('position', new THREE.BufferAttribute(refPositions, 3));
+refGeo.setAttribute('color', new THREE.BufferAttribute(refColors, 3));
+
+const refMat = new THREE.PointsMaterial({
+    size: 8.0, 
+    map: glowTex, 
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.12, // Ultra translúcidas, apenas un suspiro de color
+    blending: THREE.AdditiveBlending, 
+    depthWrite: false,
+    depthTest: true // VUELVE A ESTAR ACTIVO para que los personajes oculten la luz que está detrás
+});
+const reflections = new THREE.Points(refGeo, refMat);
+reflections.position.set(0, 6, 0); // Posición absoluta en la escena (0, 10-4, 0)
+scene.add(reflections); // Añadimos a la escena, no a la bola, para calcular posiciones absolutas
+
+scene.add(discoBall);
+
+// Create Windows with Landscape (with Parallax and Rounded Corners)
+const windowFrameTex = textureLoader.load('./ventana pared.png');
+windowFrameTex.colorSpace = THREE.SRGBColorSpace;
+const landscapeTex = textureLoader.load('./Paisaje.png');
+landscapeTex.colorSpace = THREE.SRGBColorSpace;
+
+const windowFrameMaterial = new THREE.MeshBasicMaterial({ map: windowFrameTex, transparent: true, side: THREE.FrontSide, alphaTest: 0.1 });
+
+const winWidth = 6;
+const winHeight = 12;
+const radius = 3;
+
+// Create rounded shape for the landscape to avoid showing in the transparent top corners
+const shape = new THREE.Shape();
+shape.moveTo(-winWidth/2, -winHeight/2);
+shape.lineTo(winWidth/2, -winHeight/2);
+shape.lineTo(winWidth/2, winHeight/2 - radius);
+shape.absarc(0, winHeight/2 - radius, radius, 0, Math.PI, false);
+shape.lineTo(-winWidth/2, -winHeight/2);
+
+const landscapeGeom = new THREE.ShapeGeometry(shape);
+// Fix ShapeGeometry UVs from [-3, 3] raw coordinates to [0, 1] normalized
+const pos = landscapeGeom.attributes.position;
+const uvs = landscapeGeom.attributes.uv;
+for(let i=0; i<uvs.count; i++) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    uvs.setXY(i, (x + winWidth/2)/winWidth, (y + winHeight/2)/winHeight);
+}
+uvs.needsUpdate = true;
+
+const frameGeom = new THREE.PlaneGeometry(winWidth, winHeight);
+
+const landscapeMaterialR = new THREE.MeshBasicMaterial({ map: landscapeTex, side: THREE.FrontSide });
+const landscapeMaterialL = new THREE.MeshBasicMaterial({ map: landscapeTex, side: THREE.FrontSide });
+
+landscapeTex.wrapS = THREE.RepeatWrapping;
+landscapeTex.wrapT = THREE.RepeatWrapping;
+landscapeTex.repeat.set(0.4, 1); // Crop 16:9 to a nice 1:2 vertical slice
+landscapeTex.offset.set(0.3, 0); // Center the crop
+
+const moonTex = textureLoader.load('./Luna.png');
+moonTex.colorSpace = THREE.SRGBColorSpace;
+const moonMaterial = new THREE.MeshBasicMaterial({ map: moonTex, transparent: true, side: THREE.FrontSide });
+// Make the moon much smaller to appear far away
+const moonGeom = new THREE.PlaneGeometry(1.5, 1.5);
+
+const windowZPositions = [-12, 0, 12];
+const wallX = 14.9; // Just inside the wall
+
+windowZPositions.forEach(z => {
+    // Right wall
+    const frameR = new THREE.Mesh(frameGeom, windowFrameMaterial);
+    frameR.position.set(wallX, 0, z); 
+    frameR.rotation.y = -Math.PI / 2;
+    
+    const landscapeR = new THREE.Mesh(landscapeGeom, landscapeMaterialR);
+    landscapeR.position.set(wallX + 0.05, 0, z); // Behind frame
+    landscapeR.rotation.y = -Math.PI / 2;
+    
+    scene.add(landscapeR);
+    
+    // Add Moon to the middle window on the right
+    if (z === 0) {
+        const moonR = new THREE.Mesh(moonGeom, moonMaterial);
+        moonR.position.set(wallX + 0.04, 3.0, z); // Lowered slightly
+        moonR.rotation.y = -Math.PI / 2;
+        scene.add(moonR);
+    }
+    
+    scene.add(frameR);
+    
+    // Left wall
+    const frameL = new THREE.Mesh(frameGeom, windowFrameMaterial);
+    frameL.position.set(-wallX, 0, z);
+    frameL.rotation.y = Math.PI / 2;
+    
+    const landscapeL = new THREE.Mesh(landscapeGeom, landscapeMaterialL);
+    landscapeL.position.set(-wallX - 0.05, 0, z);
+    landscapeL.rotation.y = Math.PI / 2;
+    
+    scene.add(landscapeL);
+    scene.add(frameL);
+});
+
+// Dynamic Photo Frame with Epic Transition
+// Dynamic Photo Frame with Epic Transition
+const photoWidth = 29; // roomWidth (30) menos 0.5 de marco a cada lado
+const photoHeight = 18; // roomHeight (20) menos marco superior e inferior
+const frameThickness = 0.5;
+
+// 1. Golden Frame Geometry
+const frameOuterW = photoWidth + frameThickness * 2;
+const frameOuterH = photoHeight + frameThickness * 2;
+const goldenFrameGeom = new THREE.BoxGeometry(frameOuterW, frameOuterH, 0.2);
+const goldenMaterial = new THREE.MeshStandardMaterial({
+    color: 0xffd700,
+    roughness: 0.3,
+    metalness: 0.8
+});
+const photoFrameMesh = new THREE.Mesh(goldenFrameGeom, goldenMaterial);
+const frontWallZ = 24.9; // Just inside the front wall
+photoFrameMesh.position.set(0, 0, frontWallZ);
+scene.add(photoFrameMesh);
+
+// 2. Photo Plane inside the frame
+const photoPlaneGeom = new THREE.PlaneGeometry(photoWidth, photoHeight);
+
+const transitionVertexShader = `
+    varying vec2 vUv;
+    void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+`;
+
+const transitionFragmentShader = `
+    uniform sampler2D tex1;
+    uniform sampler2D tex2;
+    uniform float aspect1;
+    uniform float aspect2;
+    uniform float progress;
+    varying vec2 vUv;
+    
+    // Simple noise function for dissolve
+    float rand(vec2 co){
+        return fract(sin(dot(co.xy ,vec2(12.9898,78.233))) * 43758.5453);
+    }
+    
+    vec4 getPhotoColor(sampler2D tex, float aspect, vec2 uv) {
+        // La geometría no es cuadrada (es 29 de ancho por 18 de alto)
+        float planeAspect = 29.0 / 18.0;
+        
+        vec2 scale = vec2(1.0);
+        // Lógica de "object-fit: contain" correcta para mallas rectangulares
+        if (aspect > planeAspect) {
+            // La foto es más ancha que la pared (proporcionalmente). Toca los lados, deja franjas arriba y abajo.
+            scale.y = aspect / planeAspect;
+        } else {
+            // La foto es más alta que la pared. Toca arriba y abajo, deja franjas a los lados.
+            scale.x = planeAspect / aspect;
+        }
+        
+        vec2 centeredUv = (uv - 0.5) * scale + 0.5;
+        
+        // Fondo de paspartú elegante: Degradado radial oscuro con textura de grano (tipo terciopelo/mate)
+        float distFromCenter = length(uv - 0.5);
+        vec3 centerColor = vec3(0.12, 0.10, 0.11); // Gris cálido muy sutil
+        vec3 edgeColor = vec3(0.02, 0.02, 0.02);   // Casi negro en los bordes
+        vec3 padRgb = mix(centerColor, edgeColor, smoothstep(0.0, 0.8, distFromCenter));
+        
+        // Ruido para romper la planeidad y darle textura de material
+        float grain = (fract(sin(dot(uv.xy ,vec2(12.9898,78.233))) * 43758.5453) - 0.5) * 0.03;
+        vec4 padColor = vec4(padRgb + grain, 1.0);
+        
+        if (centeredUv.x < 0.0 || centeredUv.x > 1.0 || centeredUv.y < 0.0 || centeredUv.y > 1.0) {
+            return padColor; 
+        }
+        
+        vec4 texColor = texture2D(tex, centeredUv);
+        
+        // Calculate distance from edges for feathering effect
+        float distX = min(centeredUv.x, 1.0 - centeredUv.x);
+        float distY = min(centeredUv.y, 1.0 - centeredUv.y);
+        float edgeDist = min(distX, distY);
+        
+        // Smoothly blend edge into padding color over 5% of the frame
+        float blend = smoothstep(0.0, 0.05, edgeDist);
+        
+        return mix(padColor, texColor, blend);
+    }
+
+    void main() {
+        vec4 color1 = getPhotoColor(tex1, aspect1, vUv);
+        vec4 color2 = getPhotoColor(tex2, aspect2, vUv);
+        
+        // Epic Dissolve + Fade
+        float noise = rand(vUv * 10.0);
+        float dissolveThreshold = progress;
+        
+        // Add a smooth glowing edge to the dissolve
+        float edge = smoothstep(noise - 0.1, noise + 0.1, dissolveThreshold);
+        
+        vec4 finalColor = mix(color1, color2, edge);
+        gl_FragColor = finalColor;
+    }
+`;
+
+const defaultTex = new THREE.Texture(); // Empty texture initially
+const photoUniforms = {
+    tex1: { value: defaultTex },
+    tex2: { value: defaultTex },
+    aspect1: { value: 1.0 },
+    aspect2: { value: 1.0 },
+    progress: { value: 0.0 }
+};
+
+const photoMaterial = new THREE.ShaderMaterial({
+    uniforms: photoUniforms,
+    vertexShader: transitionVertexShader,
+    fragmentShader: transitionFragmentShader
+});
+
+const photoMesh = new THREE.Mesh(photoPlaneGeom, photoMaterial);
+photoMeshGlobal = photoMesh; // Guardar referencia global
+photoMesh.position.set(0, 0, frontWallZ - 0.11); // Slightly in front of the frame
+photoMesh.rotation.y = Math.PI; // Face the room (front wall is +Z, so face -Z)
+scene.add(photoMesh);
+// --- SPECIAL VIDEO LOGIC ---
+function createHiddenVideo(src) {
+    const videoEl = document.createElement('video');
+    videoEl.crossOrigin = 'anonymous';
+    videoEl.loop = true;
+    videoEl.muted = true;
+    videoEl.playsInline = true;
+    videoEl.style.display = 'none';
+    
+    // Si la función de GAS está disponible y ESTAMOS EN GAS, carga desde Drive por defecto
+    if (typeof loadDriveAssetAsBlob === 'function' && typeof google !== 'undefined' && google.script) {
+        const filename = src.split('/').pop();
+        loadDriveAssetAsBlob("Videos/" + filename, "video/mp4")
+            .then(url => {
+                videoEl.src = url;
+                videoEl.load();
+                console.log('Video de Drive precargado y listo:', filename);
+            })
+            .catch(e => console.error('Error precargando video:', filename, e));
+    } else {
+        videoEl.src = src;
+    }
+    document.body.appendChild(videoEl);
+    return videoEl;
+}
+
+const videoEl1 = createHiddenVideo('./Videos/Familia revoltillo.mp4');
+const videoTex1 = new THREE.VideoTexture(videoEl1);
+videoTex1.colorSpace = THREE.SRGBColorSpace;
+const videoMat1 = new THREE.MeshBasicMaterial({ map: videoTex1, side: THREE.DoubleSide, color: 0xffffff });
+
+const videoEl2 = createHiddenVideo('./Videos/Glay 15.mp4');
+const videoTex2 = new THREE.VideoTexture(videoEl2);
+videoTex2.colorSpace = THREE.SRGBColorSpace;
+const videoMat2 = new THREE.MeshBasicMaterial({ map: videoTex2, side: THREE.DoubleSide, color: 0xffffff });
+
+let currentVideoPlaying = null;
+
+// --- UNLOCK VIDEOS ON FIRST INTERACTION ---
+// Safari/Mobile browsers block programmatic .play() if not unlocked by user interaction.
+function unlockVideos() {
+    [videoEl1, videoEl2].forEach(v => {
+        if (!v) return;
+        const p = v.play();
+        if (p !== undefined) {
+            p.then(() => {
+                if (currentVideoPlaying !== v) v.pause();
+            }).catch(e => console.warn('Unlock failed for video:', e));
+        }
+    });
+    document.body.removeEventListener('click', unlockVideos);
+    document.body.removeEventListener('touchstart', unlockVideos);
+}
+document.body.addEventListener('click', unlockVideos);
+document.body.addEventListener('touchstart', unlockVideos);
+// ------------------------------------------
+// ---------------------------
+
+// 3. Slideshow Logic
+let currentPhotos = [];
+let currentPhotoIndex = 0;
+let isTransitioning = false;
+let transitionStartTime = 0;
+const transitionDuration = 2000; // 2 seconds
+const displayDuration = 5000; // 5 seconds
+
+function fetchPhotos() {
+    Promise.resolve({
+    json: () => {
+        const fotos = Object.keys(window.driveDictionary)
+            .filter(p => p.toLowerCase().startsWith("fotos/"))
+            .map(p => p.substring(6));
+        return Promise.resolve(fotos);
+    }
+})
+        .then(res => res.json())
+        .then(photos => {
+            currentPhotos = photos;
+            if (currentPhotos.length > 0 && photoUniforms.tex1.value === defaultTex) {
+                // Initialize the first photo
+                textureLoader.load('./Fotos/' + currentPhotos[0], (tex) => {
+                    tex.colorSpace = THREE.SRGBColorSpace;
+                    photoUniforms.tex1.value = tex;
+                    if (tex.image) {
+                        photoUniforms.aspect1.value = tex.image.width / tex.image.height;
+                    }
+                });
+            }
+        })
+        .catch(err => console.error('Error fetching photos:', err));
+}
+
+setInterval(fetchPhotos, 3000); // Poll every 3 seconds
+fetchPhotos();
+
+let lastSwapTime = Date.now();
+
+let isWaitingForLoad = false;
+
+function updateSlideshow() {
+    if (currentPhotos.length < 2) return;
+    
+    const now = Date.now();
+    
+    if (!isTransitioning && !isWaitingForLoad && now - lastSwapTime > displayDuration) {
+        isWaitingForLoad = true;
+        
+        // Next photo
+        const nextIndex = (currentPhotoIndex + 1) % currentPhotos.length;
+        textureLoader.load('./Fotos/' + currentPhotos[nextIndex], (tex) => {
+            tex.colorSpace = THREE.SRGBColorSpace;
+            photoUniforms.tex2.value = tex;
+            if (tex.image) {
+                photoUniforms.aspect2.value = tex.image.width / tex.image.height;
+            }
+            currentPhotoIndex = nextIndex;
+            
+            // Start transition only after loading finishes
+            isTransitioning = true;
+            transitionStartTime = Date.now();
+            isWaitingForLoad = false;
+        });
+    }
+    
+    if (isTransitioning) {
+        let elapsed = now - transitionStartTime;
+        let progress = elapsed / transitionDuration;
+        
+        if (progress >= 1.0) {
+            progress = 1.0;
+            isTransitioning = false;
+            lastSwapTime = now;
+            // Swap tex1 and tex2
+            photoUniforms.tex1.value = photoUniforms.tex2.value;
+            photoUniforms.aspect1.value = photoUniforms.aspect2.value;
+            photoUniforms.progress.value = 0.0;
+        } else {
+            photoUniforms.progress.value = progress;
+        }
+    }
+}
+
+
+// 4. Character and Animations System
+const animPath = './Quinceanera_pose_t_biped/';
+let characterMixer = null;
+let currentAction = null;
+
+// Cinematic and Auto-Dance globals
+let autoDanceEnabled = false;
+let autoDanceTimer = 0;
+let autoDanceInterval = 7;
+
+let cinematicEnabled = false;
+let cinematicState = 0; // 0: glambot, 1: drone, 2: close-up, 3: floor
+let cinematicTimer = 0;
+let cinematicDuration = 8;
+let cinematicStartCamPos = new THREE.Vector3();
+let cinematicStartCamTarget = new THREE.Vector3();
+let savedControlsTarget = new THREE.Vector3();
+let savedCameraPos = new THREE.Vector3();
+const actions = {}; // Maps key -> AnimationAction
+const clock = new THREE.Clock();
+
+// --- SISTEMA DE ROSAS 3D ---
+let roseInstancedMesh = null;
+const maxRoses = 200;
+const activeRoses = []; // Array de objetos { active, position, velocity, rotation, spin, state, life }
+const roseDummy = new THREE.Object3D(); // Para calcular las matrices
+for (let i = 0; i < maxRoses; i++) {
+    activeRoses.push({
+        active: false,
+        position: new THREE.Vector3(),
+        velocity: new THREE.Vector3(),
+        rotation: new THREE.Euler(),
+        spin: new THREE.Vector3(),
+        state: 'idle',
+        life: 0
+    });
+}
+
+// Funciones globales para activar las rosas
+function triggerRoseRain() {
+    let spawned = 0;
+    for(let i=0; i<maxRoses && spawned<70; i++) { // Spawn 70 rosas
+        if (!activeRoses[i].active) {
+            activeRoses[i].active = true;
+            activeRoses[i].state = 'falling';
+            activeRoses[i].life = 40.0;
+            activeRoses[i].position.set((Math.random()-0.5)*15, 5 + Math.random()*5, (Math.random()-0.5)*15);
+            activeRoses[i].velocity.set((Math.random()-0.5)*0.5, -3 - Math.random()*2, (Math.random()-0.5)*0.5);
+            activeRoses[i].rotation.set(Math.random()*Math.PI*2, Math.random()*Math.PI*2, Math.random()*Math.PI*2);
+            activeRoses[i].spin.set((Math.random()-0.5)*3, (Math.random()-0.5)*3, (Math.random()-0.5)*3);
+            spawned++;
+        }
+    }
+}
+
+function triggerRoseThrow() {
+    let spawned = 0;
+    let throwCount = 3 + Math.floor(Math.random()*4); // Lanza de 3 a 6 rosas
+    for(let i=0; i<maxRoses && spawned<throwCount; i++) {
+        if (!activeRoses[i].active) {
+            activeRoses[i].active = true;
+            activeRoses[i].state = 'thrown';
+            activeRoses[i].life = 20.0;
+            
+            const startAngle = Math.random() * Math.PI * 2;
+            const startDist = 12;
+            activeRoses[i].position.set(Math.cos(startAngle)*startDist, -8.0, Math.sin(startAngle)*startDist);
+            
+            const targetPos = new THREE.Vector3((Math.random()-0.5)*4, -9.7, (Math.random()-0.5)*4);
+            const dir = targetPos.clone().sub(activeRoses[i].position).normalize();
+            
+            const forwardSpeed = 8 + Math.random()*3;
+            const upSpeed = 6 + Math.random()*3;
+            
+            activeRoses[i].velocity.set(dir.x * forwardSpeed, upSpeed, dir.z * forwardSpeed);
+            activeRoses[i].rotation.set(Math.random()*Math.PI*2, Math.random()*Math.PI*2, Math.random()*Math.PI*2);
+            activeRoses[i].spin.set((Math.random()-0.5)*10, (Math.random()-0.5)*10, (Math.random()-0.5)*10);
+            spawned++;
+        }
+    }
+}
+
+// Particle Skirt System
+let skirtMesh = null;
+let originalSkirtPositions = null;
+let originalGlitterPositions = null; // Guardamos las posiciones originales de la purpurina
+let currentSkirtLag = 15.0; 
+let glitterPoints = null; // Restaurado
+let torsoGlitterPoints = null; // New global for torso glitter
+let modestyCap = null; // Modesty cap para tapar el torso por debajo
+let torsoBone = null; // New global for torso bone
+const skirtHistory = [];
+const MAX_HISTORY = 120; // 2 seconds of history at 60fps
+let skirtBone = null;
+const boneWorldPos = new THREE.Vector3();
+const boneWorldQuat = new THREE.Quaternion();
+const initialBoneQuat = new THREE.Quaternion();
+const initialBoneQuatInv = new THREE.Quaternion();
+
+const animationsData = [
+    { file: 'Standing Greeting.fbx', key: '1', name: 'Saludar' },
+    { file: 'Hip Hop Dancing (1).fbx', key: '2', name: 'Hip Hop 1' },
+    { file: 'Hip Hop Dancing (2).fbx', key: '3', name: 'Hip Hop 2' },
+    { file: 'Hip Hop Dancing (3).fbx', key: '4', name: 'Hip Hop 3' },
+    { file: 'Hip Hop Dancing (4).fbx', key: '5', name: 'Hip Hop 4' },
+    { file: 'Hip Hop Dancing (5).fbx', key: '6', name: 'Hip Hop 5' },
+    { file: 'Hip Hop Dancing (6).fbx', key: '7', name: 'Hip Hop 6' },
+    { file: 'Hip Hop Dancing (7).fbx', key: '8', name: 'Hip Hop 7' },
+    { file: 'Hip Hop Dancing.fbx', key: '9', name: 'Hip Hop 8' },
+    { file: 'Arms Hip Hop Dance.fbx', key: 'a', name: 'Hip Hop Brazos' },
+    { file: 'Booty Hip Hop Dance.fbx', key: 'b', name: 'Hip Hop Booty' },
+    { file: 'Snake Hip Hop Dance.fbx', key: 'c', name: 'Hip Hop Snake' },
+    { file: 'Salsa Dancing.fbx', key: 'd', name: 'Salsa' },
+    { file: 'Macarena Dance.fbx', key: 'e', name: 'Macarena' },
+    { file: 'Belly Dance.fbx', key: 'f', name: 'Danza del Vientre' },
+    { file: 'Twist Dance.fbx', key: 'g', name: 'Twist' },
+    { file: 'Dancing Twerk.fbx', key: 'h', name: 'Twerk' },
+    { file: 'Blow A Kiss.fbx', key: 'i', name: 'Lanzar beso' },
+    { file: 'Dancing (1).fbx', key: 'j', name: 'Bailar 1' },
+    { file: 'Dancing.fbx', key: 'k', name: 'Bailar 2' },
+    { file: 'Jazz Dancing (1).fbx', key: 'l', name: 'Jazz 1' },
+    { file: 'Jazz Dancing.fbx', key: 'm', name: 'Jazz 2' },
+    { file: 'Northern Soul Spin.fbx', key: 'n', name: 'Giro Rápido' },
+    { file: 'Samba Dancing (1).fbx', key: 'o', name: 'Samba 1' },
+    { file: 'Samba Dancing (2).fbx', key: 'p', name: 'Samba 2' },
+    { file: 'Samba Dancing.fbx', key: 'q', name: 'Samba 3' },
+    { file: 'Shopping Cart Dance.fbx', key: 'r', name: 'Baile del Carrito' },
+    { file: 'Sitting Clap.fbx', key: 's', name: 'Sentada Aplaudiendo (Trono)' },
+    { file: 'Ballet.fbx', key: 't', name: 'Ballet' },
+    { file: 'Ballet spin.fbx', key: 'u', name: 'Ballet Spin' }
+];
+
+let targetCharacterPos = new THREE.Vector3(0, -10, -5);
+let targetCharRotX = 0;
+
+// Variables globales para efectos visuales simulados
+let lastBeatTime = 0;
+let flashPool = [];
+// Pool de luces (Evita recompilar shaders masivamente al añadir/quitar)
+for (let i = 0; i < 4; i++) {
+    const pLight = new THREE.PointLight(0xffffff, 0, 50);
+    scene.add(pLight);
+    flashPool.push(pLight);
+}
+
+const playlist = [
+    'Changa_Calle_de_Medianoche.mp3',
+    'Changa_Concrete_Ritual.mp3',
+    'Changa_Feliz Cumple Glaymar.mp3',
+    'Changa_Opa tuki.mp3',
+    'Merengue_Revoltillo_Sazonado.mp3',
+    'TecnoMerengue_Cromo_y_Arena.mp3',
+    'TecnoMerengue_Fuego_de_la_Calle.mp3',
+    'Vals_Un_vals_de_orgullo.mp3',
+    'Tambor_Candela_Presente.mp3'
+];
+let currentTrackIndex = 0;
+
+let currentAnimKey = null;
+
+// --- MAGICAL TRANSITION SYSTEM ---
+let transitionParticles = null;
+let isMagicalTransitioning = false;
+let magicalFadeLevel = 1.0;
+let magicalTransitionState = 0;
+
+function initMagicalTransition() {
+    const geom = new THREE.BufferGeometry();
+    const count = 300;
+    const positions = new Float32Array(count * 3);
+    const colors = new Float32Array(count * 3);
+    for (let i = 0; i < count; i++) {
+        const r = Math.random() * 8;
+        const theta = Math.random() * Math.PI * 2;
+        const y = (Math.random() - 0.5) * 20; 
+        positions[i*3] = r * Math.cos(theta);
+        positions[i*3+1] = y;
+        positions[i*3+2] = r * Math.sin(theta);
+        colors[i*3] = 1.0;
+        colors[i*3+1] = 1.0;
+        colors[i*3+2] = 1.0;
+    }
+    geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    
+    const canvas = document.createElement('canvas');
+    canvas.width = 16; canvas.height = 16;
+    const context = canvas.getContext('2d');
+    const gradient = context.createRadialGradient(8, 8, 0, 8, 8, 8);
+    gradient.addColorStop(0, 'rgba(255,255,255,1)');
+    gradient.addColorStop(1, 'rgba(255,255,255,0)');
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, 16, 16);
+    const tex = new THREE.CanvasTexture(canvas);
+
+    const mat = new THREE.PointsMaterial({
+        color: 0xffffff,
+        size: 0.15,
+        map: tex,
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        vertexColors: true,
+        opacity: 0.0
+    });
+    mat.onBeforeCompile = (shader) => injectTwinkle(shader, mat);
+    glitterMaterials.push(mat);
+    
+    transitionParticles = new THREE.Points(geom, mat);
+    transitionParticles.position.set(0, -5, -5); 
+    scene.add(transitionParticles);
+}
+
+function updateTargetPositions(key) {
+    if (key === 's') { 
+        if (typeof throneObjGlobal !== 'undefined' && throneObjGlobal) {
+            targetCharacterPos.set(0, throneObjGlobal.position.y - 4.5, -18.5); 
+        } else {
+            targetCharacterPos.set(0, -10, -20);
+        }
+    } else if (key === 't') { 
+        targetCharacterPos.set(0, -10, 15); 
+    } else {
+        targetCharacterPos.set(0, -10, -5); 
+    }
+    
+    if (key === 't' || key === 'u') {
+        targetCharRotX = Math.PI / 2; 
+    } else {
+        targetCharRotX = 0;
+    }
+}
+initMagicalTransition();
+
+function playAnimation(key, character) {
+    const oldKey = currentAnimKey;
+    currentAnimKey = key;
+    const newAction = actions[key];
+    if (!newAction || newAction === currentAction) return;
+
+    if (!currentAction) {
+        newAction.reset();
+        newAction.play();
+        currentAction = newAction;
+        updateTargetPositions(key);
+        return;
+    }
+
+    const isMagical = (k) => k === 's' || k === 't' || k === 'u';
+
+    if (isMagical(oldKey) || isMagical(key)) {
+        isMagicalTransitioning = true;
+        magicalTransitionState = 1;
+        magicalFadeLevel = 1.0;
+        updateTargetPositions(key);
+        
+        if (character) {
+            transitionParticles.position.copy(character.position);
+            transitionParticles.position.y += 10; 
+            
+            // Save original transparent state ONCE and make transparent
+            character.traverse(child => {
+                if(child.isMesh && child.material) {
+                    if (child.material.userData.originalTransparent === undefined) child.material.userData.originalTransparent = child.material.transparent;
+                    child.material.transparent = true;
+                    child.material.needsUpdate = true;
+                }
+            });
+            if (typeof skirtMesh !== 'undefined' && skirtMesh) {
+                if (skirtMesh.material.userData.originalTransparent === undefined) skirtMesh.material.userData.originalTransparent = skirtMesh.material.transparent;
+                skirtMesh.material.transparent = true;
+                skirtMesh.material.needsUpdate = true;
+            }
+            if (typeof modestyCap !== 'undefined' && modestyCap) {
+                if (modestyCap.material.userData.originalTransparent === undefined) modestyCap.material.userData.originalTransparent = modestyCap.material.transparent;
+                modestyCap.material.transparent = true;
+                modestyCap.material.needsUpdate = true;
+            }
+        }
+        transitionParticles.material.opacity = 1.0;
+
+        currentAction.stop();
+
+        
+        setTimeout(() => {
+            magicalTransitionState = 2; // snap phase (hidden)
+            
+            // Forzar hide absoluto de TODO mientras snap
+            if (character) character.visible = false;
+            if (typeof skirtMesh !== 'undefined' && skirtMesh) skirtMesh.visible = false;
+            if (typeof modestyCap !== 'undefined' && modestyCap) modestyCap.visible = false;
+            if (typeof glitterPoints !== 'undefined' && glitterPoints) glitterPoints.visible = false;
+            if (typeof torsoGlitterPoints !== 'undefined' && torsoGlitterPoints) torsoGlitterPoints.visible = false;
+
+            newAction.reset();
+
+            newAction.play();
+            currentAction = newAction;
+            updateTargetPositions(key);
+            
+            if (character) {
+                character.rotation.x = targetCharRotX;
+                character.position.copy(targetCharacterPos); // Snap to position
+            }
+
+            setTimeout(() => {
+                magicalTransitionState = 3; // fade in
+                if (character) character.visible = true;
+                if (typeof skirtMesh !== 'undefined' && skirtMesh) skirtMesh.visible = true;
+                if (typeof modestyCap !== 'undefined' && modestyCap) modestyCap.visible = true;
+                if (typeof glitterPoints !== 'undefined' && glitterPoints) glitterPoints.visible = true;
+                if (typeof torsoGlitterPoints !== 'undefined' && torsoGlitterPoints) torsoGlitterPoints.visible = true;
+                
+                setTimeout(() => {
+                    magicalTransitionState = 0; // done
+                    isMagicalTransitioning = false;
+                    
+                    // Restore transparency
+                    if (character) character.traverse(child => {
+                        if(child.isMesh && child.material) {
+                            child.material.transparent = child.material.userData.originalTransparent;
+                            child.material.opacity = 1.0;
+                            child.material.needsUpdate = true;
+                        }
+                    });
+                    if (typeof skirtMesh !== 'undefined' && skirtMesh) {
+                        skirtMesh.material.transparent = skirtMesh.material.userData.originalTransparent;
+                        skirtMesh.material.opacity = 1.0;
+                        skirtMesh.material.needsUpdate = true;
+                    }
+                    if (typeof modestyCap !== 'undefined' && modestyCap) {
+                        modestyCap.material.transparent = modestyCap.material.userData.originalTransparent;
+                        modestyCap.material.opacity = 1.0;
+                        modestyCap.material.needsUpdate = true;
+                    }
+                    if (typeof glitterPoints !== 'undefined' && glitterPoints) glitterPoints.material.opacity = 1.0;
+                    if (typeof torsoGlitterPoints !== 'undefined' && torsoGlitterPoints) torsoGlitterPoints.material.opacity = 1.0;
+                }, 400); // 400ms fade in
+            }, 300); // 300ms invisible pause (was 50ms)
+        }, 300); // 300ms fade out
+    } else {
+        // Normal Crossfade for non-magical keys
+        newAction.reset();
+        newAction.play();
+        newAction.crossFadeFrom(currentAction, 0.5, true);
+        currentAction = newAction;
+        updateTargetPositions(key);
+    }
+}
+
+fbxLoader.load(animPath + 'Quinceanera_pose_t_biped_Character_output.fbx', (loadedChar) => {
+    character = loadedChar;
+    // Apply textures
+    const albedoTex = textureLoader.load(animPath + 'Quinceanera_pose_t_biped_texture_0.png');
+    albedoTex.colorSpace = THREE.SRGBColorSpace;
+
+    // Pre-calcular las dimensiones originales (locales) del personaje en su pose T
+    let localYMin = Infinity;
+    let localYMax = -Infinity;
+    let localXWidth = 0;
+    loadedChar.traverse((child) => {
+        if (child.isMesh && child.geometry) {
+            child.geometry.computeBoundingBox();
+            const bbox = child.geometry.boundingBox;
+            if (bbox.min.y < localYMin) localYMin = bbox.min.y;
+            if (bbox.max.y > localYMax) localYMax = bbox.max.y;
+            const width = bbox.max.x - bbox.min.x;
+            if (width > localXWidth) localXWidth = width;
+        }
+    });
+    
+    // La cintura suele estar al 52% de la altura total
+    const waistY = localYMin + (localYMax - localYMin) * 0.52;
+    const waistTopY = localYMin + (localYMax - localYMin) * 0.65;
+    // Ancho máximo del torso (radio al cuadrado para la comparación)
+    const maxRadiusSq = (localXWidth * 0.22) ** 2;
+
+    character.traverse((child) => {
+        if (child.isMesh) {
+            // Suscribimos a Glaymar a la capa 1 para que PUEDA VER las luces exclusivas de modelo
+            child.layers.enable(1);
+            
+            // Soldar vértices desconectados y calcular normales suaves verdaderas
+            if (child.geometry) {
+                // Unimos los vértices que están en la misma posición (soldamos las costuras)
+                child.geometry = BufferGeometryUtils.mergeVertices(child.geometry);
+                // Ahora que están soldados, Three.js puede calcular un suavizado perfecto
+                child.geometry.computeVertexNormals();
+            }
+
+            // Mejoramos la definición de la textura (anisotropía y espacio de color)
+            let texMap = child.material ? child.material.map : null;
+            if (texMap) {
+                texMap.colorSpace = THREE.SRGBColorSpace; // Corrige colores lavados
+                texMap.anisotropy = renderer.capabilities.getMaxAnisotropy(); // Máxima nitidez
+                texMap.needsUpdate = true;
+            }
+
+            // Usamos MeshLambertMaterial sin los mapas PBR generados por IA (Meshy).
+            // Los mapas de normales y rugosidad automáticos suelen tener "ruido" que genera
+            // manchas oscuras bajo luces intensas. Lambert nos da un suavizado limpio y puro.
+            // IMPORTANTE: forzamos la textura PNG externa (no la embebida en el FBX)
+            // para que los cambios al archivo de textura se reflejen correctamente.
+            albedoTex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+            albedoTex.needsUpdate = true;
+            const basicMat = new THREE.MeshPhongMaterial({
+                map: albedoTex,
+                color: 0xffffff, // Color puro, sin oscurecer
+                specular: 0x222222, // Brillo sutil para que no parezca de papel mate
+                shininess: 20, // Difumina el brillo especular suavemente
+                side: THREE.FrontSide
+            });
+            // Preserve skinning for the bones
+            if (child.material && child.material.skinning) {
+                basicMat.skinning = true;
+            }
+            
+            // Shader para hacer invisible la mitad inferior del cuerpo (piernas, zapatos, falda original)
+            basicMat.onBeforeCompile = function(shader) {
+                // Capturar la posición original de la malla (en T-Pose, sin deformación de huesos)
+                shader.vertexShader = `varying float vOrigY;\nvarying float vOrigX;\nvarying float vOrigZ;\nvarying vec3 vMyViewDir;\nvarying vec3 vMyNormal;\n` + shader.vertexShader;
+                shader.vertexShader = shader.vertexShader.replace(
+                    '#include <begin_vertex>',
+                    `
+                    #include <begin_vertex>
+                    vOrigY = position.y;
+                    vOrigX = position.x;
+                    vOrigZ = position.z;
+                    `
+                );
+                
+                shader.vertexShader = shader.vertexShader.replace(
+                    '#include <project_vertex>',
+                    `
+                    #include <project_vertex>
+                    vMyViewDir = -mvPosition.xyz;
+                    vMyNormal = normalize(transformedNormal);
+                    `
+                );
+                
+                shader.fragmentShader = `varying float vOrigY;\nvarying float vOrigX;\nvarying float vOrigZ;\nvarying vec3 vMyViewDir;\nvarying vec3 vMyNormal;\n` + shader.fragmentShader;
+                shader.fragmentShader = shader.fragmentShader.replace(
+                    '#include <dithering_fragment>',
+                    `
+                    #include <dithering_fragment>
+                    // Usamos la altura calculada matemáticamente de este modelo específico
+                    if (vOrigY < ${waistY.toFixed(2)}) {
+                        gl_FragColor = vec4(0.01, 0.0, 0.0, 1.0); // Negro mate, sin brillos
+                    }
+                    // Afeitamos la falda rígida que sobresale lateralmente
+                    else if (vOrigY < ${waistTopY.toFixed(2)} && (vOrigX * vOrigX + vOrigZ * vOrigZ) > ${maxRadiusSq.toFixed(4)}) {
+                        discard;
+                    }
+                    
+                    // --- ILUMINACIÓN FRESNEL (RIM LIGHT) PARA DISIMULAR POLÍGONOS ---
+                    vec3 viewDir = normalize(vMyViewDir);
+                    vec3 normalDir = normalize(vMyNormal);
+                    float rimDot = 1.0 - max(dot(viewDir, normalDir), 0.0);
+                    // Suavizamos el borde: solo afecta a los contornos más externos
+                    float rimIntensity = smoothstep(0.65, 1.0, rimDot);
+                    // Color cálido sutil (durazno/dorado)
+                    vec3 rimColor = vec3(1.0, 0.85, 0.6);
+                    // Se suma al color final, y al ser brillante, el BloomPass lo capturará levemente
+                    gl_FragColor.rgb += rimColor * rimIntensity * 0.35;
+                    `
+                );
+            };
+            
+            child.material = basicMat;
+        } else if (child.isBone) {
+            const name = child.name.toLowerCase();
+            // Encogemos a cero los huesos de la falda original Y de las piernas para hacerla invisible
+            // de la cintura para abajo, asegurando que nada atraviese la falda nueva.
+            const isLowerBody = name.includes('skirt') || name.includes('dress') || name.includes('cloth') || name.includes('falda') || 
+                                name.includes('leg') || name.includes('thigh') || name.includes('calf') || name.includes('foot') || name.includes('toe');
+            if (isLowerBody) {
+                child.scale.set(0.001, 0.001, 0.001);
+            }
+        }
+    });
+
+    // Scale and position
+    const box = new THREE.Box3().setFromObject(character);
+    const size = box.getSize(new THREE.Vector3());
+    const scaleFactor = 7 / size.y;
+    character.scale.set(scaleFactor, scaleFactor, scaleFactor);
+    
+    character.position.set(0, -10, -5); 
+    scene.add(character);
+    // El modelo proyecta sombra y la recibe
+    character.traverse((child) => {
+        if (child.isMesh) {
+            child.castShadow    = true;
+            child.receiveShadow = true;
+        }
+    });
+
+    // Initialize Particle Skirt
+    character.traverse((child) => {
+        if (child.isBone) {
+            const name = child.name.toLowerCase();
+            if (name.includes('hips') || name.includes('pelvis')) {
+                if (!skirtBone) skirtBone = child;
+            }
+            if (name.includes('spine') || name.includes('chest') || name.includes('torso')) {
+                if (!torsoBone) torsoBone = child;
+            }
+        }
+    });
+    if (!skirtBone) skirtBone = character;
+
+    // Capture the rest pose rotation of the hip
+    character.updateMatrixWorld(true);
+    skirtBone.getWorldQuaternion(initialBoneQuat);
+    initialBoneQuatInv.copy(initialBoneQuat).invert();
+
+    // 2. SKIRT GENERATION (Procedural Mesh)
+    // Create a cylinder that we will deform into a dress
+    // Hacemos el radio de la cintura más ajustado (0.42)
+    const radiusTop = 0.42; 
+    const radiusBottom = 4.2; 
+    const skirtHeight = 5.0; // from waist to floor roughly
+    const radialSegments = 120; 
+    const heightSegments = 60; 
+
+    const skirtGeo = new THREE.CylinderGeometry(
+        radiusTop, radiusBottom, skirtHeight, 
+        radialSegments, heightSegments, true 
+    );
+
+    // 4. ESCULPIDO PROCEDURAL (Acampanado y Pliegues)
+    const positions = skirtGeo.attributes.position;
+    
+    for (let i = 0; i < positions.count; i++) {
+        // Y goes from +skirtHeight/2 to -skirtHeight/2 in CylinderGeometry
+        const y = positions.getY(i); 
+        const normalizedDepth = 1 - ((y + (skirtHeight / 2)) / skirtHeight);
+        
+        const x = positions.getX(i);
+        const z = positions.getZ(i);
+        const angle = Math.atan2(z, x);
+        const currentRadius = Math.sqrt(x*x + z*z);
+        
+        // Bell flare, folds & Abombada (puffiness)
+        let bellFlare = Math.pow(normalizedDepth, 2.0) * 1.8; // Más ancha desde arriba
+        const puff = Math.sin(normalizedDepth * Math.PI) * 0.3; // Añade un abombado en el medio
+        bellFlare += puff;
+
+        const folds = Math.sin(angle * 14) * (Math.pow(normalizedDepth, 1.5) * 0.4);
+
+        // Alargada atrás (Train/Cola)
+        let backMultiplier = 0;
+        // Asumiendo que +Z es hacia adelante y -Z es hacia atrás
+        if (Math.sin(angle) < 0) { 
+            backMultiplier = -Math.sin(angle); // 1 en la pura espalda, 0 en los costados
+        }
+        
+        const extraRadius = backMultiplier * normalizedDepth * 1.8; // Se abre más hacia atrás
+        const extraLength = backMultiplier * normalizedDepth * 2.0; // Cae más bajo hacia atrás
+
+        // Abombamiento esférico permanente en el medio (para cubrir rodillas flexionadas)
+        const kneeBulge = Math.sin(normalizedDepth * Math.PI) * 0.6; // Empuja 0.6 unidades en el centro
+
+        // Pellizco en la cintura: hundimos el borde superior agresivamente hacia adentro del modelo
+        // para que la tela nazca desde "adentro" del cuerpo y el offset no la haga atravesar la piel
+        const waistPinch = (1.0 - Math.min(1.0, normalizedDepth * 15.0)) * -0.12; 
+
+        const newRadius = currentRadius + bellFlare + folds + extraRadius + kneeBulge + waistPinch;
+        
+        // El cilindro de Three.js está centrado en Y=0.
+        // Lo bajamos para que su "techo" (cintura) quede en Y=0 (relativo a la cadera)
+        positions.setXYZ(i, Math.cos(angle) * newRadius, y - (skirtHeight / 2) - extraLength, Math.sin(angle) * newRadius);
+    }
+    
+    skirtGeo.computeVertexNormals();
+    originalSkirtPositions = skirtGeo.attributes.position.clone();
+
+    // --- TEXTURA DEL PATRÓN BORDÓ Y ORO ---
+    const patternTex = textureLoader.load('./Quinceanera_pose_t_biped/Textura falda.png');
+    patternTex.colorSpace = THREE.SRGBColorSpace;
+    patternTex.wrapS = THREE.RepeatWrapping;
+    patternTex.wrapT = THREE.RepeatWrapping;
+    // Ajustar la repetición para que el patrón se vea bien distribuido (6 repeticiones alrededor, 3 a lo largo)
+    patternTex.repeat.set(6, 2); 
+
+    // 5. MATERIAL (Tela con patrón, con inyección de saturación roja y profundidad 3D)
+    const skirtMat = new THREE.MeshPhongMaterial({ 
+        map: patternTex,
+        color: 0xcccccc, // Lo oscurecemos un poco para que no se vea lavada
+        emissive: 0x7a001c, 
+        emissiveIntensity: 0.15, // Bajamos el brillo interno para recuperar el tono oscuro y elegante
+        specular: 0x111111,
+        shininess: 15,
+        side: THREE.FrontSide,
+        depthWrite: true,
+        polygonOffset: false
+    });
+    
+    // Shader customizado para hacer el interior de la falda completamente oscuro (tapar huecos)
+    skirtMat.onBeforeCompile = function(shader) {
+        shader.fragmentShader = shader.fragmentShader.replace(
+            '#include <dithering_fragment>',
+            `
+            if (!gl_FrontFacing) {
+                gl_FragColor = vec4(0.01, 0.0, 0.0, 1.0); // Negro por dentro de la falda
+            }
+            #include <dithering_fragment>
+            `
+        );
+    };
+
+    skirtMesh = new THREE.Mesh(skirtGeo, skirtMat);
+    skirtMesh.layers.enable(1); // Suscribimos la falda procedural a las luces exclusivas
+    skirtMesh.frustumCulled = false; // Previene que la falda desaparezca cuando la cámara está muy cerca o en un borde
+    scene.add(skirtMesh);
+
+    // --- PURPURINA MULTICOLOR MUY FINA ---
+    // Clonamos la geometría para darle su propio buffer, de modo que podamos ensancharla en la cintura independientemente
+    const glitterGeo = skirtGeo.clone();
+    
+    // Ensanchamos la cintura de la purpurina para que cubra la falda base del modelo
+    originalGlitterPositions = glitterGeo.attributes.position.clone();
+    for(let i=0; i<originalGlitterPositions.count; i++) {
+        const y = originalGlitterPositions.getY(i);
+        const normalizedDepth = Math.abs(y + (skirtHeight / 2)) / skirtHeight; // 0 en cintura, 1 abajo
+        
+        // Más ancha en la cintura (0.20 extra de radio), desvaneciéndose hacia abajo pero manteniendo un mínimo de 0.05
+        // para que la purpurina de la cola "flote" sobre la tela y no quede oculta debajo.
+        const extraWidth = 0.05 + (1.0 - normalizedDepth) * 0.20;
+        
+        const x = originalGlitterPositions.getX(i);
+        const z = originalGlitterPositions.getZ(i);
+        const angle = Math.atan2(z, x);
+        const radius = Math.sqrt(x*x + z*z);
+        
+        originalGlitterPositions.setXYZ(i, Math.cos(angle) * (radius + extraWidth), y, Math.sin(angle) * (radius + extraWidth));
+    }
+    
+    // Generamos purpurina MULTICOLOR
+    const vertexCount = glitterGeo.attributes.position.count;
+    const glitterColors = new Float32Array(vertexCount * 3);
+    for(let i = 0; i < vertexCount; i++) {
+        // En HSL, la saturación máxima real se logra con Lightness en 0.5 exacto.
+        // Valores mayores a 0.5 mezclan el color con blanco, haciéndolo ver pastel/lavado.
+        const c = new THREE.Color().setHSL(Math.random(), 1.0, 0.5); 
+        glitterColors[i*3] = c.r;
+        glitterColors[i*3+1] = c.g;
+        glitterColors[i*3+2] = c.b;
+    }
+    glitterGeo.setAttribute('color', new THREE.BufferAttribute(glitterColors, 3));
+    
+    const glitterMat = new THREE.PointsMaterial({
+        size: 0.01, // Purpurina mucho más fina y delicada
+        vertexColors: true,
+        transparent: false, // Ya no es transparente
+        depthWrite: true, // Ahora bloquea lo que hay detrás (sólida)
+        polygonOffset: false
+    });
+    glitterMat.onBeforeCompile = (shader) => injectTwinkle(shader, glitterMat);
+    glitterMaterials.push(glitterMat);
+    
+    glitterPoints = new THREE.Points(glitterGeo, glitterMat); // Asignada a variable global
+    glitterPoints.layers.enable(1); 
+    scene.add(glitterPoints);
+
+    // --- CARGA DE ROSA 3D ---
+    const roseTex = textureLoader.load('./Rosa 3D/Low_Poly_Rose_Mesh_0729215548_texture.png');
+    roseTex.colorSpace = THREE.SRGBColorSpace;
+    fbxLoader.load('./Rosa 3D/Low_Poly_Rose_Mesh_0729215548_texture.fbx', (object) => {
+        const geometries = [];
+        object.updateMatrixWorld(true);
+        object.traverse((child) => {
+            if (child.isMesh && child.geometry) {
+                const geom = child.geometry.clone();
+                geom.applyMatrix4(child.matrixWorld);
+                geometries.push(geom);
+            }
+        });
+        
+        if (geometries.length > 0) {
+            let roseGeometry = geometries.length === 1 ? geometries[0] : BufferGeometryUtils.mergeGeometries(geometries);
+            // Normalizar escala y centrar
+            roseGeometry.computeBoundingBox();
+            const box = roseGeometry.boundingBox;
+            const size = box.getSize(new THREE.Vector3());
+            const maxDim = Math.max(size.x, size.y, size.z);
+            if (maxDim > 0) {
+                const targetSize = 0.6; // 60 centimetros (un poco más grandes para que destaquen)
+                const scaleFactor = targetSize / maxDim;
+                roseGeometry.scale(scaleFactor, scaleFactor, scaleFactor);
+            }
+            roseGeometry.center(); // Asegura que el centro de rotacin sea el centro de la rosa
+            roseGeometry.computeVertexNormals();
+
+            const roseMat = new THREE.MeshBasicMaterial({
+                map: roseTex,
+                color: 0xffaaaa, // Ligeramente rojizo para resaltar
+                
+                side: THREE.FrontSide
+            });
+            roseInstancedMesh = new THREE.InstancedMesh(roseGeometry, roseMat, maxRoses);
+            roseInstancedMesh.count = 0; // Oculto al inicio
+            // Optimizaciones
+            roseInstancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+            roseInstancedMesh.castShadow = false;
+            roseInstancedMesh.receiveShadow = false;
+            roseInstancedMesh.matrixAutoUpdate = false;
+            roseInstancedMesh.frustumCulled = false; // Siempre dibujar las que estn activas
+            // roseInstancedMesh.layers.enable(1); // Desactivado para optimizar FPS
+            scene.add(roseInstancedMesh);
+        }
+    });
+
+    // 6. GENERAR PURPURINA EXCLUSIVA PARA EL TORSO
+    if (!torsoBone) torsoBone = skirtBone;
+    
+    const torsoHeight = 2.2; // Altura del corset (ligeramente más corto)
+    const torsoGeo = new THREE.CylinderGeometry(0.5, 0.42, torsoHeight, 60, 30, true);
+    torsoGeo.translate(0, (torsoHeight / 2) - 1.3, 0); // Lo bajamos menos agresivamente para que no asome por debajo
+    
+    const torsoVertexCount = torsoGeo.attributes.position.count;
+    const torsoColors = new Float32Array(torsoVertexCount * 3);
+    for(let i=0; i<torsoVertexCount; i++) {
+        // Colores saturados al máximo igual que la falda
+        const c = new THREE.Color().setHSL(Math.random(), 1.0, 0.5); 
+        torsoColors[i*3] = c.r;
+        torsoColors[i*3+1] = c.g;
+        torsoColors[i*3+2] = c.b;
+        
+        // Añadir ruido (imperfección) para que parezca una nube de estrellas que se amolda al cuerpo
+        const x = torsoGeo.attributes.position.getX(i);
+        const y = torsoGeo.attributes.position.getY(i);
+        const z = torsoGeo.attributes.position.getZ(i);
+        const len = Math.sqrt(x*x + z*z);
+        const noiseX = (x/len) * (Math.random() * 0.1); 
+        const noiseZ = (z/len) * (Math.random() * 0.1);
+        // Aplastar el cilindro en el eje Z para que tenga forma de torso humano (óvalo) en lugar de tubo recto
+        let modifiedZ = z;
+        modifiedZ *= 0.65; // Aplaste global (pecho y espalda más planos que los costados)
+        
+        // Aplastar aún más la parte superior frontal
+        // La Y va desde aprox -0.35 hasta 2.15. Factor de 0 (abajo) a 1 (arriba).
+        const upperFactor = Math.max(0, Math.min(1, (y + 0.35) / 2.5));
+        modifiedZ *= (1.0 - (upperFactor * 0.4)); // Hasta un 40% más plano en la zona del pecho alto
+        
+        torsoGeo.attributes.position.setXYZ(i, x + noiseX, y + (Math.random()-0.5)*0.1, modifiedZ + noiseZ);
+    }
+    torsoGeo.setAttribute('color', new THREE.BufferAttribute(torsoColors, 3));
+    
+    // Misma materialidad fina de la falda
+    const torsoGlitterMat = new THREE.PointsMaterial({
+        size: 0.015,
+        vertexColors: true,
+        transparent: false,
+        depthWrite: true,
+        polygonOffset: false
+    });
+    torsoGlitterMat.onBeforeCompile = (shader) => injectTwinkle(shader, torsoGlitterMat);
+    glitterMaterials.push(torsoGlitterMat);
+    
+    torsoGlitterPoints = new THREE.Points(torsoGeo, torsoGlitterMat);
+    scene.add(torsoGlitterPoints);
+    
+    // 7. Modesty Cap (Tapa negra para ocultar el agujero del torso cortado)
+    // Usamos una esfera aplastada en lugar de un cilindro para evitar bordes filosos que atraviesen la tela
+    const capGeo = new THREE.SphereGeometry(1.4, 32, 16); 
+    capGeo.scale(1, 0.05, 0.85); // Aplastado casi plano en Y, levemente ovalado en Z
+    const capMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
+    modestyCap = new THREE.Mesh(capGeo, capMat);
+    scene.add(modestyCap);
+
+    characterMixer = new THREE.AnimationMixer(character);
+
+    // Populate UI Menu and Load Animations
+    const animListEl = document.getElementById('anim-list');
+    
+    animationsData.forEach(anim => {
+        // Build UI
+        const li = document.createElement('li');
+        li.innerHTML = `<span>${anim.name}</span> <span class="hotkey">${anim.key.toUpperCase()}</span>`;
+        li.addEventListener('click', () => {
+            playAnimation(anim.key, character);
+        });
+        animListEl.appendChild(li);
+
+        // Load FBX Animation
+        fbxLoader.load(animPath + anim.file, (animObj) => {
+            if (animObj.animations && animObj.animations.length > 0) {
+                const clip = animObj.animations[0];
+                
+                const action = characterMixer.clipAction(clip);
+                action.setLoop(THREE.LoopPingPong); // Hace que la animación vaya y venga suavemente
+                actions[anim.key] = action;
+                
+                // Play first animation by default
+                if (anim.key === '1') {
+                    currentAction = action;
+                    action.play();
+                }
+            } else {
+                console.error('¡Cuidado! El archivo FBX no contiene animaciones o está corrupto:', anim.file);
+            }
+        }, undefined, (error) => {
+            console.error('Error cargando la animación:', anim.file, error);
+        });
+    });
+
+    const btnToggleMenu = document.getElementById('btn-toggle-menu');
+    if (btnToggleMenu) {
+        btnToggleMenu.addEventListener('click', () => {
+            if (uiMenu.style.display === 'none') {
+                uiMenu.style.display = 'block';
+                btnToggleMenu.textContent = 'Ocultar Menú';
+            } else {
+                uiMenu.style.display = 'none';
+                btnToggleMenu.textContent = 'Mostrar Menú';
+            }
+        });
+    }
+
+    // --- REPRODUCTOR DE MÚSICA & EFECTOS VISUALES SIMULADOS ---
+    const audioEl = document.getElementById('bg-audio');
+    
+    const trackNameEl = document.getElementById('track-name');
+    const btnPlay = document.getElementById('btn-play');
+    const btnPrev = document.getElementById('btn-prev');
+    const btnNext = document.getElementById('btn-next');
+    const volSlider = document.getElementById('volume-slider');
+
+    function stopCurrentAudio() {
+        if (currentAudioEl) {
+            currentAudioEl.onended = null;
+            currentAudioEl.onerror = null;
+            currentAudioEl.pause();
+            currentAudioEl.src = "";
+            currentAudioEl.load();
+            currentAudioEl = null;
+        }
+        audioIsPlaying = false;
+    }
+
+    function loadTrack(index) {
+        const songPath = playlist[index];
+        const baseName = songPath.replace(".mp3", "");
+        if (trackNameEl) trackNameEl.textContent = baseName + " (Cargando...)";
+        stopCurrentAudio();
+        const myGen = ++loadGeneration;
+        const fileId = getDriveFileId("Musica/" + songPath);
+        if (!fileId) {
+            console.error("Sin fileId para:", songPath);
+            if (trackNameEl) trackNameEl.textContent = baseName + " (no encontrado)";
+            return Promise.resolve();
+        }
+        return new Promise((resolve, reject) => {
+            google.script.run
+                .withSuccessHandler(dataUri => {
+                    if (myGen !== loadGeneration) { console.log("Obsoleto:", baseName); return; }
+                    const audio = new Audio(dataUri);
+                    audio.volume = volSlider ? parseFloat(volSlider.value) : 0.5;
+                    audio.onended = function() {
+                        audioIsPlaying = false;
+                        if (btnPlay) btnPlay.textContent = "▶";
+                        currentTrackIndex = (currentTrackIndex + 1) % playlist.length;
+                        loadTrack(currentTrackIndex).then(() => {
+                            if (currentAudioEl) {
+                                currentAudioEl.play()
+                                    .then(() => { audioIsPlaying = true; if (btnPlay) btnPlay.textContent = "⏸"; })
+                                    .catch(console.error);
+                            }
+                        });
+                    };
+                    audio.onerror = function() {
+                        if (audio.src && audio.src.length > 10)
+                            console.error("Error audio:", baseName, audio.error);
+                    };
+                    currentAudioEl = audio;
+                    // Conectar al AudioContext de grabación para que el audio quede en video aunque se grabe sin música previa
+                    if (typeof _connectAudioToRecorder === 'function') _connectAudioToRecorder(audio);
+                    if (trackNameEl) trackNameEl.textContent = baseName;
+                    console.log("Lista:", baseName);
+                    resolve();
+                })
+                .withFailureHandler(err => {
+                    if (myGen !== loadGeneration) return;
+                    console.error("Error cargando audio:", err);
+                    if (trackNameEl) trackNameEl.textContent = baseName + " ❌";
+                    reject(err);
+                })
+                .getAudioAsBase64(fileId);
+        });
+    }
+
+    function togglePlay() {
+        if (!currentAudioEl) {
+            if (trackNameEl) trackNameEl.textContent = "Espera a que cargue...";
+            return;
+        }
+        if (!currentAudioEl.paused) {
+            currentAudioEl.pause();
+            audioIsPlaying = false;
+            if (btnPlay) btnPlay.textContent = "▶";
+        } else {
+            currentAudioEl.play()
+                .then(() => { audioIsPlaying = true; if (btnPlay) btnPlay.textContent = "⏸"; })
+                .catch(err => console.error("play() rechazado:", err));
+        }
+    }
+
+    if (btnPlay)  btnPlay.addEventListener("click", togglePlay);
+    if (btnNext)  btnNext.addEventListener("click", () => {
+        const was = !!(currentAudioEl && !currentAudioEl.paused);
+        currentTrackIndex = (currentTrackIndex + 1) % playlist.length;
+        loadTrack(currentTrackIndex).then(() => {
+            if (was && currentAudioEl)
+                currentAudioEl.play().then(() => { audioIsPlaying = true; if (btnPlay) btnPlay.textContent = "⏸"; }).catch(console.error);
+        });
+    });
+    if (btnPrev)  btnPrev.addEventListener("click", () => {
+        const was = !!(currentAudioEl && !currentAudioEl.paused);
+        currentTrackIndex = (currentTrackIndex - 1 + playlist.length) % playlist.length;
+        loadTrack(currentTrackIndex).then(() => {
+            if (was && currentAudioEl)
+                currentAudioEl.play().then(() => { audioIsPlaying = true; if (btnPlay) btnPlay.textContent = "⏸"; }).catch(console.error);
+        });
+    });
+    if (volSlider) volSlider.addEventListener("input", e => { if (currentAudioEl) currentAudioEl.volume = parseFloat(e.target.value); });
+
+    loadTrack(currentTrackIndex);
+
+    const btnAutoDance = document.getElementById('btn-auto-dance');
+    if (btnAutoDance) {
+        btnAutoDance.addEventListener('click', () => {
+            autoDanceEnabled = !autoDanceEnabled;
+            btnAutoDance.classList.toggle('active', autoDanceEnabled);
+            btnAutoDance.textContent = `Auto-Dance (${autoDanceEnabled ? 'On' : 'Off'})`;
+            if (autoDanceEnabled) {
+                autoDanceTimer = autoDanceInterval; // Trigger immediately
+            }
+        });
+    }
+
+    const btnCinematic = document.getElementById('btn-cinematic');
+    if (btnCinematic) {
+        btnCinematic.addEventListener('click', () => {
+            cinematicEnabled = !cinematicEnabled;
+            btnCinematic.classList.toggle('active', cinematicEnabled);
+            btnCinematic.textContent = `Cámara Cinemática (${cinematicEnabled ? 'On' : 'Off'})`;
+            if (cinematicEnabled) {
+                controls.enabled = false;
+                savedCameraPos.copy(camera.position);
+                savedControlsTarget.copy(controls.target);
+                cinematicTimer = cinematicDuration; // Trigger first shot immediately
+            } else {
+                controls.enabled = true;
+                camera.position.copy(savedCameraPos);
+                controls.target.copy(savedControlsTarget);
+            }
+        });
+    }
+
+    // --- EVENTOS DEL SISTEMA DE ROSAS ---
+    const btnRoseRain = document.getElementById('btn-rose-rain');
+    if (btnRoseRain) {
+        btnRoseRain.addEventListener('click', triggerRoseRain);
+    }
+
+    const btnRoseThrow = document.getElementById('btn-rose-throw');
+    if (btnRoseThrow) {
+        btnRoseThrow.addEventListener('click', triggerRoseThrow);
+    }
+
+    // --- SISTEMA DE GRABACIÓN DE VIDEO ---
+    let mediaRecorder;
+    let recordedChunks = [];
+    let isRecording = false;
+    const btnRecord = document.getElementById('btn-record');
+
+    // Inicializar AudioContext para captura de audio en grabación (siempre listo, no depende de que la música esté sonando)
+    function _ensureRecordAudioCtx() {
+        if (_recordAudioCtx) return;
+        try {
+            _recordAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            _recordAudioDest = _recordAudioCtx.createMediaStreamDestination();
+            // Conectar el audio actual al destino si ya existe
+            if (currentAudioEl) {
+                _recordAudioSrc = _recordAudioCtx.createMediaElementSource(currentAudioEl);
+                _recordAudioSrc.connect(_recordAudioDest);
+                _recordAudioSrc.connect(_recordAudioCtx.destination); // Seguir oyendo el audio
+            }
+        } catch(e) { console.warn('AudioContext no disponible:', e.message); }
+    }
+
+    // Cada vez que se selecciona una canción nueva, conectarla al AudioContext de grabación
+    function _connectAudioToRecorder(audioEl) {
+        if (!_recordAudioCtx) return;
+        try {
+            if (_recordAudioSrc) {
+                _recordAudioSrc.disconnect();
+                _recordAudioSrc = null;
+            }
+            _recordAudioSrc = _recordAudioCtx.createMediaElementSource(audioEl);
+            _recordAudioSrc.connect(_recordAudioDest);
+            _recordAudioSrc.connect(_recordAudioCtx.destination);
+        } catch(e) { /* ya conectado o no disponible */ }
+    }
+    window._connectAudioToRecorder = _connectAudioToRecorder;
+
+    if (btnRecord) {
+        btnRecord.addEventListener('click', () => {
+            if (!isRecording) {
+                // Iniciar Grabación
+                recordedChunks = [];
+
+                // Asegurarse de tener el AudioContext listo
+                _ensureRecordAudioCtx();
+
+                // Stream de video del canvas 3D
+                const videoStream = renderer.domElement.captureStream(60);
+
+                // Combinar video con audio del AudioContext (siempre disponible)
+                let stream = videoStream;
+                if (_recordAudioDest && _recordAudioDest.stream.getAudioTracks().length > 0) {
+                    stream = new MediaStream([
+                        ...videoStream.getVideoTracks(),
+                        ..._recordAudioDest.stream.getAudioTracks()
+                    ]);
+                    console.log('Grabando: video + audio (AudioContext)');
+                } else if (currentAudioEl && typeof currentAudioEl.captureStream === 'function') {
+                    // Fallback: intenta capturar directamente del elemento de audio
+                    try {
+                        const aStream = currentAudioEl.captureStream();
+                        const aTracks = aStream.getAudioTracks();
+                        if (aTracks.length > 0) {
+                            stream = new MediaStream([...videoStream.getVideoTracks(), ...aTracks]);
+                        }
+                    } catch(e) { console.warn('Fallback audio capture falló:', e.message); }
+                }
+
+                // Formato: mp4 > webm h264 > webm vp9 (20 Mbps)
+                const bitrate = 20000000;
+                let options = { mimeType: 'video/webm;codecs=vp9', videoBitsPerSecond: bitrate };
+                if (MediaRecorder.isTypeSupported('video/mp4')) {
+                    options = { mimeType: 'video/mp4', videoBitsPerSecond: bitrate };
+                } else if (MediaRecorder.isTypeSupported('video/webm;codecs=h264')) {
+                    options = { mimeType: 'video/webm;codecs=h264', videoBitsPerSecond: bitrate };
+                }
+
+                try {
+                    mediaRecorder = new MediaRecorder(stream, options);
+                } catch (e) {
+                    mediaRecorder = new MediaRecorder(stream, { videoBitsPerSecond: bitrate });
+                }
+
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) recordedChunks.push(event.data);
+                };
+
+                mediaRecorder.onstop = () => {
+                    const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    document.body.appendChild(a);
+                    a.style = 'display: none';
+                    a.href = url;
+                    const dateStr = new Date().toISOString().replace(/:/g, '-').split('.')[0];
+                    const extension = mediaRecorder.mimeType.includes('mp4') ? 'mp4' : 'webm';
+                    a.download = `Glaymar_15_${dateStr}.${extension}`;
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+                };
+
+                mediaRecorder.start();
+                isRecording = true;
+                btnRecord.innerHTML = '🔴 Grabando...';
+                btnRecord.classList.add('recording');
+            } else {
+                // Detener Grabación
+                mediaRecorder.stop();
+                isRecording = false;
+                btnRecord.innerHTML = '🎥 Grabar Video';
+                btnRecord.classList.remove('recording');
+            }
+        });
+    }
+
+    window.addEventListener('keydown', (e) => {
+        const key = e.key.toLowerCase();
+        if (actions[key]) {
+            playAnimation(key, character);
+        }
+    });
+});
+
+// Resize Handler
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    composer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// --- TEXTO "GRACIAS POR VENIR" Y CORAZONES DORADOS ---
+const textCanvas = document.createElement('canvas');
+textCanvas.width = 512; textCanvas.height = 128;
+const textCtx = textCanvas.getContext('2d');
+textCtx.fillStyle = 'rgba(0,0,0,0)'; textCtx.fillRect(0,0,512,128);
+textCtx.font = 'bold 50px "Georgia"'; textCtx.textAlign = 'center'; textCtx.textBaseline = 'middle';
+textCtx.shadowColor = '#3b0013'; textCtx.shadowBlur = 10; textCtx.shadowOffsetX = 2; textCtx.shadowOffsetY = 2;
+const gradient = textCtx.createLinearGradient(0, 0, 0, 128);
+gradient.addColorStop(0, '#fff3a1'); gradient.addColorStop(0.5, '#ffd700'); gradient.addColorStop(1, '#b8860b');
+textCtx.fillStyle = gradient;
+textCtx.fillText('Gracias por venir', 256, 64);
+const textTexture = new THREE.CanvasTexture(textCanvas);
+const textMat = new THREE.SpriteMaterial({ map: textTexture, color: 0xffffff, transparent: true, opacity: 0 });
+const textSprite = new THREE.Sprite(textMat);
+textSprite.scale.set(10, 2.5, 1);
+textSprite.position.set(0, 12, 0);
+textSprite.visible = false;
+scene.add(textSprite);
+
+const hearts = [];
+const heartCv = document.createElement('canvas');
+heartCv.width = 128; heartCv.height = 128;
+const hCtx = heartCv.getContext('2d');
+hCtx.shadowColor = '#ff6600'; // Resplandor naranja/dorado difuso
+hCtx.shadowBlur = 20; 
+hCtx.fillStyle = '#ffea00'; // Color dorado vivo
+hCtx.beginPath();
+const hx = 64, hy = 35;
+hCtx.moveTo(hx, hy + 20);
+hCtx.bezierCurveTo(hx, hy + 20, hx - 15, hy, hx - 35, hy);
+hCtx.bezierCurveTo(hx - 55, hy, hx - 55, hy + 30, hx - 55, hy + 30);
+hCtx.bezierCurveTo(hx - 55, hy + 50, hx - 20, hy + 70, hx, hy + 85);
+hCtx.bezierCurveTo(hx + 20, hy + 70, hx + 55, hy + 50, hx + 55, hy + 30);
+hCtx.bezierCurveTo(hx + 55, hy + 30, hx + 55, hy, hx + 35, hy);
+hCtx.bezierCurveTo(hx + 15, hy, hx, hy + 20, hx, hy + 20);
+hCtx.fill();
+const heartTex = new THREE.CanvasTexture(heartCv);
+const heartGeo = new THREE.PlaneGeometry(1.5, 1.5);
+for(let i=0; i<30; i++) {
+    const mesh = new THREE.Mesh(heartGeo, new THREE.MeshBasicMaterial({ 
+        map: heartTex, 
+        color: 0xffffff, 
+        side: THREE.DoubleSide, 
+        transparent: true, 
+        opacity: 0,
+        blending: THREE.AdditiveBlending, // Esto le da el brillo mágico extra luminoso
+        depthWrite: false
+    }));
+    mesh.visible = false;
+    mesh.userData = { active: false, life: 0, vel: new THREE.Vector3(), rotSpeed: new THREE.Vector3(), scaleMod: 1 };
+    scene.add(mesh);
+    hearts.push(mesh);
+}
+// ----------------------------------------------------
+
+// Animation Loop
+// En móvil limitamos a ~30 FPS para ahorrar batería y garantizar fluidez
+const _mobileFPSInterval = qualityLevel === 'low' ? 1000 / 30 : 0;
+let _lastFrameTime = 0;
+let lastVideoTrack = null;
+function updateVideoFrame() {
+    if (typeof playlist === 'undefined' || !playlist[currentTrackIndex]) return;
+    const trackName = playlist[currentTrackIndex];
+    const audioIsPlayingState = typeof audioIsPlaying !== 'undefined' 
+        ? audioIsPlaying 
+        : (document.getElementById('bg-audio') && !document.getElementById('bg-audio').paused);
+
+    if (trackName === lastVideoTrack) {
+        if (currentVideoPlaying) {
+            if (audioIsPlayingState && currentVideoPlaying.paused) currentVideoPlaying.play().catch(e=>{});
+            if (!audioIsPlayingState && !currentVideoPlaying.paused) currentVideoPlaying.pause();
+        }
+        return;
+    }
+    
+    lastVideoTrack = trackName;
+    if (typeof photoMeshGlobal !== 'undefined' && photoMeshGlobal) {
+        if (trackName.includes('Merengue_Revoltillo_Sazonado')) {
+            console.log('Aplicando video 1:', trackName);
+            photoMeshGlobal.material = videoMat1;
+            if (currentVideoPlaying && currentVideoPlaying !== videoEl1) currentVideoPlaying.pause();
+            if (currentVideoPlaying !== videoEl1) videoEl1.currentTime = 0;
+            currentVideoPlaying = videoEl1;
+        } else if (trackName.includes('Vals_Un_vals_de_orgullo')) {
+            console.log('Aplicando video 2:', trackName);
+            photoMeshGlobal.material = videoMat2;
+            if (currentVideoPlaying && currentVideoPlaying !== videoEl2) currentVideoPlaying.pause();
+            if (currentVideoPlaying !== videoEl2) videoEl2.currentTime = 0;
+            currentVideoPlaying = videoEl2;
+        } else {
+            if (photoMeshGlobal.material !== photoMaterial) console.log('Restaurando fotos.');
+            photoMeshGlobal.material = photoMaterial;
+            if (currentVideoPlaying) {
+                currentVideoPlaying.pause();
+                currentVideoPlaying = null;
+            }
+        }
+    }
+}
+
+function animate(timestamp = 0) {
+    requestAnimationFrame(animate);
+    updateVideoFrame();
+    // FPS cap solo en Low (móvil)
+    if (_mobileFPSInterval > 0) {
+        if (timestamp - _lastFrameTime < _mobileFPSInterval) return;
+        _lastFrameTime = timestamp;
+    }
+
+    const delta = clock.getDelta();
+    if (characterMixer) characterMixer.update(delta);
+
+    // Magical transition particle update
+    if (typeof transitionParticles !== 'undefined' && transitionParticles) {
+        if (isMagicalTransitioning) {
+            transitionParticles.material.opacity = Math.min(1.0, transitionParticles.material.opacity + 0.1);
+            transitionParticles.rotation.y += 0.02; // Slower rotation
+            const pos = transitionParticles.geometry.attributes.position.array;
+            for(let i=1; i < pos.length; i+=3) {
+                pos[i] += 0.1; // Slower upward movement
+                if (pos[i] > 10) pos[i] = -10;
+            }
+            transitionParticles.geometry.attributes.position.needsUpdate = true;
+            
+            // Inertia movement towards new target
+            const targetP = new THREE.Vector3(targetCharacterPos.x, targetCharacterPos.y + 10, targetCharacterPos.z);
+            transitionParticles.position.lerp(targetP, 0.05);
+        } else {
+            transitionParticles.material.opacity = Math.max(0.0, transitionParticles.material.opacity - 0.05);
+            transitionParticles.rotation.y += 0.01;
+        }
+    }
+
+    if (magicalTransitionState > 0) {
+        if (magicalTransitionState === 1) {
+            magicalFadeLevel = Math.max(0.0, magicalFadeLevel - (delta * 3.33)); // fade out 300ms
+        }
+        else if (magicalTransitionState === 2) {
+            magicalFadeLevel = 0.0;
+        }
+        else if (magicalTransitionState === 3) {
+            magicalFadeLevel = Math.min(1.0, magicalFadeLevel + (delta * 2.5)); // fade in 400ms
+        }
+        
+        // Check for visibility (especially for low FPS devices where the fade might skip directly to state 2)
+        if (magicalFadeLevel <= 0.05 && magicalTransitionState !== 3) {
+            if (character) character.visible = false;
+            if (typeof skirtMesh !== 'undefined' && skirtMesh) skirtMesh.visible = false;
+            if (typeof modestyCap !== 'undefined' && modestyCap) modestyCap.visible = false;
+            if (typeof glitterPoints !== 'undefined' && glitterPoints) glitterPoints.visible = false;
+            if (typeof torsoGlitterPoints !== 'undefined' && torsoGlitterPoints) torsoGlitterPoints.visible = false;
+        }
+        
+        if (character) character.traverse(child => { if(child.isMesh && child.material) child.material.opacity = magicalFadeLevel; });
+        if (typeof skirtMesh !== 'undefined' && skirtMesh) skirtMesh.material.opacity = magicalFadeLevel;
+        if (typeof modestyCap !== 'undefined' && modestyCap) modestyCap.material.opacity = magicalFadeLevel;
+        if (typeof glitterPoints !== 'undefined' && glitterPoints) glitterPoints.material.opacity = magicalFadeLevel;
+        if (typeof torsoGlitterPoints !== 'undefined' && torsoGlitterPoints) torsoGlitterPoints.material.opacity = magicalFadeLevel;
+    }
+
+    // Interpolate Character Position smoothly
+    if (character) {
+        // Desplazamiento más lento si la distancia es muy grande (evitar saltos bruscos)
+        const dist = character.position.distanceTo(targetCharacterPos);
+        const lerpSpeed = dist > 5 ? 0.01 : 0.05; 
+        character.position.lerp(targetCharacterPos, lerpSpeed);
+        character.rotation.x += (targetCharRotX - character.rotation.x) * 0.1;
+    }
+    
+    // --- EFECTOS DE SALUDO Y BESO ---
+    if (character) {
+        if (currentAnimKey === '1') {
+            textSprite.visible = true;
+            textSprite.material.opacity = Math.min(1, textSprite.material.opacity + 0.05);
+            textSprite.position.set(character.position.x, character.position.y + 10.5, character.position.z + 2);
+        } else {
+            textSprite.material.opacity = Math.max(0, textSprite.material.opacity - 0.05);
+            if(textSprite.material.opacity <= 0) textSprite.visible = false;
+        }
+
+        if (currentAnimKey === 'i') {
+            if (Math.random() < 0.04) { // Probabilidad reducida para spawnear menos corazones
+                const h = hearts.find(x => !x.userData.active);
+                if (h) {
+                    h.userData.active = true; h.userData.life = 2.0;
+                    // Nace más cerca de Glaymar (aprox altura del pecho/manos)
+                    h.position.set(character.position.x, character.position.y + 7.0, character.position.z + 0.5);
+                    // Dispara hacia adelante, no tan arriba
+                    h.userData.vel.set((Math.random() - 0.5) * 3, Math.random() * 1.5 - 0.5, (Math.random() - 0.5) * 2 + 3);
+                    h.userData.rotSpeed.set(Math.random()*4-2, Math.random()*4-2, Math.random()*4-2);
+                    h.visible = true; h.material.opacity = 1;
+                    const sc = Math.random() * 0.4 + 0.2; // Tamaños mucho más pequeños
+                    h.userData.scaleMod = sc;
+                    h.scale.set(sc, sc, sc);
+                }
+            }
+        }
+    }
+    
+    // Animar corazones
+    hearts.forEach(h => {
+        if(h.userData.active) {
+            h.userData.life -= delta;
+            if(h.userData.life <= 0) {
+                h.userData.active = false; h.visible = false;
+            } else {
+                h.position.addScaledVector(h.userData.vel, delta);
+                h.rotation.x += h.userData.rotSpeed.x * delta;
+                h.rotation.y += h.userData.rotSpeed.y * delta;
+                h.rotation.z += h.userData.rotSpeed.z * delta;
+                h.material.opacity = Math.min(1, h.userData.life * 1.5);
+            }
+        }
+    });
+    // --------------------------------
+
+    // --- EFECTOS VISUALES DE FIESTA (SIMULADOS) ---
+    const timeNow = performance.now() / 1000;
+    if (audioIsPlaying) {
+        // Simulamos un beat de música rítmica cada 0.45 segundos (aprox 133 BPM)
+        if (timeNow - lastBeatTime > 0.45) {
+            lastBeatTime = timeNow;
+            
+            // 1. Efecto Discoteca (Strobe Global)
+            ambientLight.intensity = 1.5;
+            
+            // 2. Efecto Paparazzi (Reutilizar destellos del pool para evitar LAG masivo)
+            const numFlashes = 2 + Math.floor(Math.random() * 3); // 2 a 4 flashes por beat
+            for (let i = 0; i < numFlashes && i < flashPool.length; i++) {
+                const pLight = flashPool[i];
+                pLight.intensity = 150; // Intenso pero decae rápido
+                pLight.position.set(
+                    (Math.random() - 0.5) * 80, // Aleatorio en X
+                    -5 + Math.random() * 25,    // Aleatorio en altura
+                    -20 + Math.random() * 60    // Aleatorio en Z (pista de baile)
+                );
+            }
+        }
+    }
+    
+    // Decaimiento del Strobe Global
+    if (ambientLight.intensity > 0.15) {
+        ambientLight.intensity -= 0.08;
+        if (ambientLight.intensity < 0.15) ambientLight.intensity = 0.15;
+    }
+    
+    // Decaimiento de Flashes Paparazzi
+    if (typeof flashPool !== 'undefined') {
+        for (let i = 0; i < flashPool.length; i++) {
+            if (flashPool[i].intensity > 0) {
+                flashPool[i].intensity -= 15; // Apagado rápido
+                if (flashPool[i].intensity < 0) flashPool[i].intensity = 0;
+            }
+        }
+    }
+    
+    // Animación de la luz de rebote (cambia de color por todo el espectro lentamente)
+    // Usamos el tiempo (Date.now()) para hacer un ciclo suave. Un ciclo completo cada 10 segundos.
+    const time = Date.now();
+    bounceLight.color.setHSL((time % 10000) / 10000, 1.0, 0.6);
+
+    // Hacemos que la luz frontal persiga a la cámara orbitando alrededor del personaje.
+    // Esto asegura que Glaymar siempre esté iluminada "de frente" desde el punto de vista del usuario,
+    // pero manteniendo el foco a una distancia matemática estricta para que no ilumine las paredes.
+    if (character) {
+        const dx = camera.position.x - character.position.x;
+        const dz = camera.position.z - character.position.z;
+        const angle = Math.atan2(dz, dx);
+        // Colocamos la luz a 8 metros del personaje, en la misma dirección que la cámara
+        frontLight.position.x = character.position.x + Math.cos(angle) * 8;
+        frontLight.position.z = character.position.z + Math.sin(angle) * 8;
+    }
+    
+    if (discoBall) {
+        discoBall.rotation.y += 0.005;
+        
+        const bounds = { minX: -14.9, maxX: 14.9, minY: -15.9, maxY: 3.9, minZ: -24.9, maxZ: 24.9 };
+        const angle = discoBall.rotation.y;
+        const cosA = Math.cos(angle);
+        const sinA = Math.sin(angle);
+        
+        for (let i = 0; i < reflectionsCount; i++) {
+            const dx = rayDirs[i].x * cosA - rayDirs[i].z * sinA;
+            const dy = rayDirs[i].y;
+            const dz = rayDirs[i].x * sinA + rayDirs[i].z * cosA;
+
+            let t = Infinity;
+            if (dx > 0) t = Math.min(t, bounds.maxX / dx);
+            else if (dx < 0) t = Math.min(t, bounds.minX / dx);
+            
+            if (dy > 0) t = Math.min(t, bounds.maxY / dy);
+            else if (dy < 0) t = Math.min(t, bounds.minY / dy);
+            
+            if (dz > 0) t = Math.min(t, bounds.maxZ / dz);
+            else if (dz < 0) t = Math.min(t, bounds.minZ / dz);
+            
+            // MAGIA MATEMÁTICA: 't' es la distancia exacta en metros hasta la pared.
+            // Le restamos 3.5 metros para que la partícula flote JUSTO antes de tocar la pared.
+            // Como su radio es 4.0 (size 8/2), se difuminará perfectamente sin chocar contra la pared,
+            // ¡permitiendo que el depthTest oculte las luces que están detrás de Glaymar!
+            t = t - 3.5;
+            
+            refPositions[i * 3] = dx * t;
+            refPositions[i * 3 + 1] = dy * t;
+            refPositions[i * 3 + 2] = dz * t;
+        }
+        refGeo.attributes.position.needsUpdate = true;
+    }
+    
+    const timeSec = Date.now() / 1000;
+
+    // Actualizar el tiempo en TODOS los shaders de purpurina para que titilen continuamente
+    glitterMaterials.forEach(mat => {
+        if (mat.userData && mat.userData.shader) {
+            mat.userData.shader.uniforms.uTime.value = timeSec;
+        }
+    });
+    
+    // Actualizar el tiempo de las velas neón
+    candelabraMaterials.forEach(mat => {
+        if (mat.userData && mat.userData.shader) {
+            mat.userData.shader.uniforms.uTime.value = timeSec;
+        }
+    });
+    
+    // Actualizar el tiempo del brillo en la punta del pastel
+    cakeMaterials.forEach(mat => {
+        if (mat.userData && mat.userData.shader) {
+            mat.userData.shader.uniforms.uTime.value = timeSec;
+        }
+    });
+    
+    // Update Torso Glitter and Modesty Cap Tracking
+    if (torsoBone) {
+        if (torsoGlitterPoints) {
+            torsoBone.getWorldPosition(torsoGlitterPoints.position);
+            torsoBone.getWorldQuaternion(torsoGlitterPoints.quaternion);
+        }
+        if (modestyCap) {
+            torsoBone.getWorldPosition(modestyCap.position);
+            torsoBone.getWorldQuaternion(modestyCap.quaternion);
+            
+            // Si es ballet, ajustamos el tamaño y posición del tapón para que no sobresalga del vestido
+            if (targetCharRotX !== 0) {
+                modestyCap.scale.set(0.4, 1.0, 0.3); // Achicamos muchísimo más (60-70% menos)
+                modestyCap.translateY(-0.7); // Lo subimos mucho más adentro del torso
+            } else {
+                modestyCap.scale.set(1.0, 1.0, 1.0); // Tamaño original
+                modestyCap.translateY(-1.3); // Posición original
+            }
+        }
+    }
+
+    if (characterMixer) {
+        
+        // Auto-Dance Logic
+        if (autoDanceEnabled) {
+            autoDanceTimer += delta;
+            if (autoDanceTimer >= autoDanceInterval) {
+                autoDanceTimer = 0;
+                autoDanceInterval = 5 + Math.random() * 4; // Entre 5 y 9 segundos
+                
+                let allowedKeys = Object.keys(actions);
+                // Si la canción actual es Vals, solo usar ballet y giro
+                if (playlist[currentTrackIndex] && playlist[currentTrackIndex].includes('Vals')) {
+                    allowedKeys = ['t', 'u', 'n']; // Ballet, Ballet Spin, Giro Rápido
+                }
+                
+                const randomKey = allowedKeys[Math.floor(Math.random() * allowedKeys.length)];
+                
+                if (currentAction !== actions[randomKey]) {
+                    playAnimation(randomKey, character);
+                }
+            }
+        }
+    }
+    
+    // Cinematic Camera Logic
+    if (cinematicEnabled && character) {
+        cinematicTimer += delta;
+        
+        if (cinematicTimer >= cinematicDuration) {
+            cinematicTimer = 0;
+            cinematicState = (cinematicState + 1) % 8; // Ahora son 8 tomas (5 de Glaymar, 3 de Props)
+            
+            // --- GATILLO DE ROSAS INTELIGENTE ---
+            // Solo lanzamos rosas cuando la cámara se corta y enfoca a Glaymar
+            if ([0, 1, 2, 3, 7].includes(cinematicState)) {
+                if (Math.random() > 0.3) { // 70% de probabilidad de que haya rosas en tomas a Glaymar
+                    if (Math.random() > 0.5) {
+                        triggerRoseRain();
+                    } else {
+                        triggerRoseThrow();
+                    }
+                }
+            }
+
+            if (cinematicState === 0) cinematicDuration = 7; // Glambot
+            else if (cinematicState === 1) cinematicDuration = 8; // Drone
+            else if (cinematicState === 2) cinematicDuration = 5; // Close-up
+            else if (cinematicState === 3) cinematicDuration = 6; // Floor
+            else if (cinematicState === 4) cinematicDuration = 5; // Pastel
+            else if (cinematicState === 5) cinematicDuration = 10; // Trono
+            else if (cinematicState === 6) cinematicDuration = 6; // Cuadro (Fotos)
+            else if (cinematicState === 7) cinematicDuration = 7; // Cenital (Desde arriba)
+        }
+        
+        const t = cinematicTimer / cinematicDuration;
+        const easeInOut = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+        const easeOut = 1 - Math.pow(1 - t, 3);
+        
+        const targetPos = new THREE.Vector3();
+        const lookAtTarget = new THREE.Vector3();
+        
+        const charPos = character.position.clone();
+        const headPos = charPos.clone().add(new THREE.Vector3(0, 5, 0));
+        const waistPos = charPos.clone().add(new THREE.Vector3(0, 3, 0));
+        const isSitting = (currentAnimKey === 's');
+        
+        if (cinematicState === 0) { // Glambot (Sweep from low/close to high/far)
+            const startAngle = isSitting ? Math.PI * 0.4 : Math.PI * 0.1;
+            const endAngle = isSitting ? Math.PI * 0.6 : Math.PI * 0.9; // Se mantiene más al frente si está sentada
+            const currentAngle = startAngle + (endAngle - startAngle) * easeInOut;
+            
+            const dist = 8.5 + 4 * easeOut; // Más lejos (mínimo 8.5m)
+            const height = charPos.y + 1 + 4 * easeOut;
+            
+            targetPos.set(
+                charPos.x + Math.cos(currentAngle) * dist,
+                height,
+                charPos.z + Math.sin(currentAngle) * dist
+            );
+            lookAtTarget.copy(waistPos);
+            
+            if (characterMixer) {
+                const timeScale = 1.0 - 0.8 * Math.exp(-Math.pow((t - 0.5) * 5, 2));
+                characterMixer.timeScale = timeScale;
+            }
+        } else if (cinematicState === 1) { // Drone (Espiral descendente frontal)
+            const angle = Math.PI * 0.8 - t * Math.PI * 0.6; 
+            const height = charPos.y + 11.5 - t * 4; 
+            const dist = 12 - t * 3; 
+            targetPos.set(
+                charPos.x + Math.cos(angle) * dist,
+                height,
+                charPos.z + Math.sin(angle) * dist
+            );
+            lookAtTarget.copy(waistPos);
+            if (characterMixer) characterMixer.timeScale = 1.0;
+        } else if (cinematicState === 2) { // Close-up (Órbita sutil y suave al frente)
+            const angle = isSitting ? (Math.PI * 0.5) : (Math.PI * 0.3 + t * Math.PI * 0.4); 
+            targetPos.set(
+                charPos.x + Math.cos(angle) * 8.0, 
+                headPos.y + 0.5 - t * 0.5, 
+                charPos.z + Math.sin(angle) * 8.0
+            );
+            lookAtTarget.copy(headPos);
+            if (characterMixer) characterMixer.timeScale = 1.0;
+        } else if (cinematicState === 3) { // Floor looking up (Crane vertical hacia arriba)
+            const angle = isSitting ? Math.PI * 0.5 : -Math.PI * 0.2; 
+            targetPos.set(
+                charPos.x + Math.cos(angle) * 8.5, 
+                charPos.y - 1.0 + t * 5.0, 
+                charPos.z + Math.sin(angle) * 8.5
+            );
+            lookAtTarget.copy(headPos);
+            if (characterMixer) characterMixer.timeScale = 1.0;
+        } else if (cinematicState === 4) { // Pastel (Paneo Frontal Seguro)
+            if (cakeObjGlobal) {
+                const cakePos = cakeObjGlobal.position.clone();
+                cakePos.y += 3; // Apuntar a la mitad del pastel
+                // Ángulo restringido para asegurar que la cámara se mantenga solo por el frente
+                const angle = Math.PI * 0.75 - easeOut * 0.25; // Rango opuesto para enfocar la derecha del pastel
+                targetPos.set(
+                    cakePos.x + Math.cos(angle) * 4,
+                    cakePos.y + 2 - easeOut * 1,
+                    cakePos.z + Math.sin(angle) * 4
+                );
+                lookAtTarget.copy(cakePos);
+            } else {
+                cinematicTimer = cinematicDuration; // Saltar si no existe
+            }
+            if (characterMixer) characterMixer.timeScale = 1.0;
+        } else if (cinematicState === 5) { // Trono (Dolly In)
+            if (throneObjGlobal) {
+                const thronePos = throneObjGlobal.position.clone();
+                thronePos.y += 4; // Apuntar al respaldo
+                const dist = 18 - easeOut * 4; // Se acerca suavemente desde más lejos (18 a 14)
+                targetPos.set(thronePos.x + 2, thronePos.y + 1, thronePos.z + dist);
+                lookAtTarget.copy(thronePos);
+            } else {
+                cinematicTimer = cinematicDuration;
+            }
+            if (characterMixer) characterMixer.timeScale = 1.0;
+        } else if (cinematicState === 6) { // Cuadro (Fotos) - Más lejos y paneo lateral
+            if (photoMeshGlobal) {
+                const photoPos = photoMeshGlobal.position.clone();
+                targetPos.set(photoPos.x - 4, photoPos.y, photoPos.z - 12); // Z-12 para alejarlo mucho más
+                targetPos.x += easeOut * 6.0; // Paneo lateral amplio
+                lookAtTarget.copy(photoPos);
+            } else {
+                cinematicTimer = cinematicDuration;
+            }
+            if (characterMixer) characterMixer.timeScale = 1.0;
+        } else if (cinematicState === 7) { // Cenital (Top-down spinning view)
+            const height = 18 - easeOut * 4; // Baja lentamente desde casi el techo
+            const angle = easeOut * Math.PI * 0.5; // Gira suavemente mientras baja
+            const radius = 8.0; // Distancia súper segura circular
+            
+            targetPos.set(
+                charPos.x + Math.cos(angle) * radius,
+                charPos.y + height,
+                charPos.z + Math.sin(angle) * radius
+            );
+            lookAtTarget.copy(charPos);
+            if (characterMixer) characterMixer.timeScale = 1.0;
+        }
+        
+        camera.position.copy(targetPos);
+        controls.target.copy(lookAtTarget);
+        camera.lookAt(lookAtTarget);
+    } else {
+        if (characterMixer) characterMixer.timeScale = 1.0;
+    }
+    
+    // Update Procedural Skirt Physics
+    if (skirtMesh && skirtBone && originalSkirtPositions) {
+        
+        // --- DINÁMICA DE INERCIA BASADA EN ROSAS ---
+        let activeRoseCount = 0;
+        for (let i = 0; i < maxRoses; i++) {
+            if (activeRoses[i].active) activeRoseCount++;
+        }
+        // Si hay muchas rosas (lluvia o lanzamientos múltiples), bajar la inercia a 6. Si no, 15.
+        // En móvil (qualityLevel=low) usamos valores más bajos para evitar el efecto líquido exagerado.
+        const maxLag = qualityLevel === 'low' ? 5 : 22; // Aumentamos de 15 a 22 para más inercia arriba de 30fps
+        const minLag = qualityLevel === 'low' ? 2 : 6;
+        const targetLag = activeRoseCount > 15 ? minLag : maxLag;
+        // Transición suave (lerp) para evitar tirones bruscos (snapping) al cambiar la inercia
+        currentSkirtLag += (targetLag - currentSkirtLag) * 4.0 * delta;
+        
+        // Track the hip position for the center of the skirt
+        skirtBone.getWorldPosition(boneWorldPos);
+        
+        // Get the current rotation of the hip bone
+        skirtBone.getWorldQuaternion(boneWorldQuat);
+        
+        // Calculate how much the hip has rotated since the T-pose
+        const deltaQuat = boneWorldQuat.clone().multiply(initialBoneQuatInv);
+        
+        // Save to history
+        skirtHistory.push({
+            pos: boneWorldPos.clone(),
+            quat: deltaQuat.clone()
+        });
+        
+        if (skirtHistory.length > MAX_HISTORY) {
+            skirtHistory.shift();
+        }
+        
+        const historyLen = skirtHistory.length;
+        const positions = skirtMesh.geometry.attributes.position;
+        const glitPositions = glitterPoints ? glitterPoints.geometry.attributes.position : null;
+        const skirtHeight = 4.5;
+        
+        for (let i = 0; i < positions.count; i++) {
+            const originalX = originalSkirtPositions.getX(i);
+            const originalY = originalSkirtPositions.getY(i);
+            const originalZ = originalSkirtPositions.getZ(i);
+
+            // normalizedDepth goes from 0 (waist, y=0) to 1 (bottom, y=-4.5)
+            const normalizedDepth = Math.abs(originalY) / skirtHeight;
+
+            // Apply exponential curve so waist is perfectly rigid, but lag skyrockets at bottom
+            const rigidDepth = Math.pow(normalizedDepth, 2.0); 
+            
+            const lagSensitivity = currentSkirtLag; // Usa la inercia dinámica suavizada (12 o 6)
+            const frameLag = Math.floor(rigidDepth * lagSensitivity);
+            
+            const historyIndex = Math.max(0, historyLen - 1 - frameLag);
+            const hist = skirtHistory[historyIndex] || skirtHistory[historyLen - 1];
+
+            // Topografía dinámica (Suelo, Altar, Trono)
+            function getFloorHeight(vx, vz, hipY) {
+                let fy = -9.95; // Suelo base del salón
+                
+                // 1. Altar (Forma ovalada con bordes suaves para no crear precipicios)
+                const dX = vx / 1.5; 
+                const dZ = vz - (-20.0); // Centro del altar en Z=-20
+                const altarDist = Math.sqrt(dX*dX + dZ*dZ);
+                const altarTop = -8.2;
+                
+                // Ampliamos el radio matemático del altar para que la tela empiece a subir
+                // antes y no atraviese los escalones físicos del modelo 3D.
+                if (altarDist < 6.5) {
+                    fy = altarTop;
+                } else if (altarDist < 9.5) {
+                    // Cuesta suave (rampa) hacia el suelo
+                    const t = (altarDist - 6.5) / 3.0; // 9.5 - 6.5 = 3.0
+                    const smoothT = t * t * (3 - 2 * t); // ease-in-out
+                    fy = altarTop * (1 - smoothT) + (-9.95) * smoothT;
+                }
+                
+                // 2. Trono (Cojín suave, como un domo invisible)
+                // Si usamos cajas cuadradas, la tela crea "picos" estirados en los bordes (acantilados de 90 grados).
+                // Usamos un campo de distancia ovalado para que la tela fluya como una cascada redonda en todas direcciones.
+                const cushionY = hipY - 2.0; 
+                const cZ = vz - (-19.5); // Centro del asiento
+                const cX = vx / 1.2; // Ovalado
+                const cushionDist = Math.sqrt(cX*cX + cZ*cZ);
+                
+                if (cushionDist < 1.8) {
+                    // Centro plano del asiento
+                    fy = Math.max(fy, cushionY);
+                } else if (cushionDist < 3.8) {
+                    // Pendiente suave que cae hacia el altar
+                    const t = (cushionDist - 1.8) / 2.0;
+                    const smoothT = t * t * (3 - 2 * t);
+                    const slopeY = cushionY * (1 - smoothT) + fy * smoothT; // fy aquí es el altar debajo
+                    fy = Math.max(fy, slopeY);
+                }
+                
+                return fy;
+            }
+
+            // Dynamic Train Shrink: Cuando se acerca al trono, encogemos la "cola" del vestido
+            // para que no atraviese el trono ni requiera dobleces irreales.
+            let lOx = originalX;
+            let lOy = originalY;
+            let lOz = originalZ;
+            
+            if (hist.pos.z < -14.0) {
+                // Si está en la zona del trono (z < -14)
+                if (lOz < 0) {
+                    // Encogemos la parte trasera (la cola)
+                    lOz *= 0.10; // Reduce el largo hacia atrás al 10%
+                    lOx *= 0.40; // Reduce el ancho trasero al 40%
+                } else {
+                    // Frente de la falda: Abombar (Puff up) sobre el regazo y las rodillas
+                    const normalizedDepth = Math.abs(lOy) / skirtHeight; // 0 (cintura) a 1 (piso)
+                    const bulge = Math.sin(normalizedDepth * Math.PI); // Curva suave, máxima en el medio
+                    
+                    lOy += bulge * 1.8; // Levanta la tela hacia arriba (un poco menos)
+                    lOz += bulge * 1.0; // Empuja la tela hacia adelante (un poco menos)
+                    lOx *= (1.0 + bulge * 0.15); // La ensancha un poco a los lados
+                }
+            }
+
+            // Start with the local vertex offset
+            const localPos = new THREE.Vector3(lOx, lOy, lOz);
+            localPos.applyQuaternion(hist.quat);
+            localPos.add(hist.pos);
+            
+            // Colisión con las paredes del salón (Evita que atraviese los muros)
+            const wallLimitX = 22.0; 
+            const wallLimitZ = 22.0;
+            const wallLimitZNeg = -23.0; // Límite pared trasera
+            
+            if (localPos.x > wallLimitX) localPos.x = wallLimitX;
+            if (localPos.x < -wallLimitX) localPos.x = -wallLimitX;
+            if (localPos.z > wallLimitZ) localPos.z = wallLimitZ;
+            // No limitamos hacia atrás (-Z) tanto aquí porque ya tiene el límite del trono, 
+            // pero podemos poner un límite general del salón.
+            if (localPos.z < -28.0) localPos.z = -28.0;
+
+            // Aplicamos colisión de la falda base
+            const floorY = getFloorHeight(localPos.x, localPos.z, hist.pos.y);
+            if (localPos.y < floorY) {
+                const penetration = floorY - localPos.y;
+                localPos.y = floorY; 
+                
+                // Arrastre sobre la superficie (Limitado para no estirar la textura)
+                const dx = localPos.x - hist.pos.x;
+                const dz = localPos.z - hist.pos.z;
+                const dist = Math.sqrt(dx*dx + dz*dz) || 0.001;
+                const pushOut = Math.min(penetration * 0.4, 1.5); // Máximo 1.5 unidades de empuje horizontal
+                localPos.x += (dx / dist) * pushOut;
+                localPos.z += (dz / dist) * pushOut;
+            }
+            positions.setXYZ(i, localPos.x, localPos.y, localPos.z);
+            
+            // Handle Glitter points physics identically
+            if (glitPositions && originalGlitterPositions) {
+                let gOx = originalGlitterPositions.getX(i);
+                let gOy = originalGlitterPositions.getY(i);
+                let gOz = originalGlitterPositions.getZ(i);
+                
+                if (hist.pos.z < -14.0) {
+                    if (gOz < 0) {
+                        gOz *= 0.10;
+                        gOx *= 0.40;
+                    } else {
+                        const normalizedDepth = Math.abs(gOy) / skirtHeight;
+                        const bulge = Math.sin(normalizedDepth * Math.PI);
+                        
+                        gOy += bulge * 1.8; 
+                        gOz += bulge * 1.0; 
+                        gOx *= (1.0 + bulge * 0.15);
+                    }
+                }
+                
+                const gLocalPos = new THREE.Vector3(gOx, gOy, gOz);
+                gLocalPos.applyQuaternion(hist.quat);
+                gLocalPos.add(hist.pos);
+                
+                if (gLocalPos.x > wallLimitX) gLocalPos.x = wallLimitX;
+                if (gLocalPos.x < -wallLimitX) gLocalPos.x = -wallLimitX;
+                if (gLocalPos.z > wallLimitZ) gLocalPos.z = wallLimitZ;
+                if (gLocalPos.z < wallLimitZNeg) gLocalPos.z = wallLimitZNeg;
+                if (gLocalPos.z < -28.0) gLocalPos.z = -28.0;
+                
+                const gFloorY = getFloorHeight(gLocalPos.x, gLocalPos.z, hist.pos.y);
+                // La falda base se asienta en gFloorY. Hacemos que la purpurina se asiente en gFloorY + 0.08
+                // para que flote físicamente por encima de la tela arrastrada.
+                if (gLocalPos.y < gFloorY + 0.08) {
+                    const penetration = (gFloorY + 0.08) - gLocalPos.y;
+                    gLocalPos.y = gFloorY + 0.08;
+                    const dx = gLocalPos.x - hist.pos.x;
+                    const dz = gLocalPos.z - hist.pos.z;
+                    const dist = Math.sqrt(dx*dx + dz*dz) || 0.001;
+                    // Empujamos un 5% más fuerte hacia afuera (0.45 en vez de 0.4) para que la purpurina envuelva los bordes
+                    const pushOut = Math.min(penetration * 0.45, 1.6);
+                    gLocalPos.x += (dx / dist) * pushOut;
+                    gLocalPos.z += (dz / dist) * pushOut;
+                }
+                glitPositions.setXYZ(i, gLocalPos.x, gLocalPos.y, gLocalPos.z);
+            }
+        }
+        
+        positions.needsUpdate = true;
+        skirtMesh.geometry.computeVertexNormals();
+        if (glitPositions) glitPositions.needsUpdate = true;
+    }
+
+    // --- ACTUALIZACIÓN SISTEMA DE ROSAS ---
+    if (roseInstancedMesh) {
+        let activeCount = 0;
+        for (let i=0; i<maxRoses; i++) {
+            const rose = activeRoses[i];
+            if (rose.active) {
+                rose.life -= delta;
+                if (rose.life <= 0) {
+                    rose.active = false;
+                    continue;
+                }
+                
+                if (rose.state === 'falling') {
+                    // Camara lenta
+                    rose.velocity.y -= 1.0 * delta; // Gravedad suave
+                    // Resistencia al aire (fricción de pluma)
+                    rose.velocity.multiplyScalar(0.99);
+                    if (rose.velocity.y < -4) rose.velocity.y = -4; // Velocidad terminal límite más alta
+                    
+                    rose.position.addScaledVector(rose.velocity, delta);
+                    rose.rotation.x += rose.spin.x * delta;
+                    rose.rotation.y += rose.spin.y * delta;
+                    rose.rotation.z += rose.spin.z * delta;
+                    
+                    if (rose.position.y <= -9.7) { // Suelo está en -10, radio de rosa es 0.3
+                        rose.position.y = -9.7;
+                        rose.state = 'floor';
+                    }
+                } else if (rose.state === 'thrown') {
+                    // Tiro físico normal
+                    rose.velocity.y -= 15.0 * delta; // Gravedad real más pesada
+                    rose.position.addScaledVector(rose.velocity, delta);
+                    rose.rotation.x += rose.spin.x * delta;
+                    rose.rotation.y += rose.spin.y * delta;
+                    rose.rotation.z += rose.spin.z * delta;
+                    
+                    if (rose.position.y <= -9.7) {
+                        rose.position.y = -9.7;
+                        // Rebote físico
+                        if (Math.abs(rose.velocity.y) > 2) {
+                            rose.velocity.y *= -0.4; // Pierde mucha energía al rebotar
+                            rose.velocity.x *= 0.5;
+                            rose.velocity.z *= 0.5;
+                            rose.spin.multiplyScalar(0.4);
+                        } else {
+                            rose.state = 'floor';
+                        }
+                    }
+                }
+                
+                // --- REPULSOR DE FALDA (Campo de fuerza) ---
+                if (typeof boneWorldPos !== 'undefined' && typeof skirtBone !== 'undefined' && skirtBone && rose.position.y <= boneWorldPos.y && rose.position.y >= -10.0) {
+                    const depth = boneWorldPos.y - rose.position.y;
+                    let normalizedDepth = depth / 5.0; // skirtHeight es 5.0 aprox
+                    if (normalizedDepth > 1.0) normalizedDepth = 1.0;
+                    
+                    // Calcular el radio matemático de la falda a esta altura (cilindro acampanado + pliegues)
+                    let skirtRadiusAtY = 0.42 + (4.2 - 0.42) * normalizedDepth;
+                    skirtRadiusAtY += Math.sin(normalizedDepth * Math.PI) * 1.8; // Bulge de los pliegues
+                    skirtRadiusAtY += 0.8; // Margen adicional (0.8m) para que las rosas no se solapen con la tela
+                    
+                    const dx = rose.position.x - boneWorldPos.x;
+                    const dz = rose.position.z - boneWorldPos.z;
+                    const dist = Math.sqrt(dx*dx + dz*dz);
+                    
+                    // Si la rosa cruzó el umbral del vestido, la empujamos hacia afuera
+                    if (dist < skirtRadiusAtY) {
+                        let nx = dx / dist;
+                        let nz = dz / dist;
+                        if (dist === 0) { nx = 1; nz = 0; }
+                        
+                        // Expulsión física hacia la superficie externa del vestido
+                        rose.position.x = boneWorldPos.x + nx * skirtRadiusAtY;
+                        rose.position.z = boneWorldPos.z + nz * skirtRadiusAtY;
+                        
+                        // Añadir inercia para que "resbalen" por la tela
+                        if (rose.state !== 'floor') {
+                            rose.velocity.x += nx * 20.0 * delta;
+                            rose.velocity.z += nz * 20.0 * delta;
+                        }
+                    }
+                }
+                
+                // Actualizar matriz de la instancia
+                roseDummy.position.copy(rose.position);
+                roseDummy.rotation.copy(rose.rotation);
+                roseDummy.scale.set(1.0, 1.0, 1.0); // Restaurar a tamaño real
+                roseDummy.updateMatrix();
+                roseInstancedMesh.setMatrixAt(activeCount, roseDummy.matrix);
+                activeCount++;
+            }
+        }
+        roseInstancedMesh.count = activeCount;
+        roseInstancedMesh.instanceMatrix.needsUpdate = true;
+    }
+    
+    if (typeof updateSlideshow === 'function') updateSlideshow();
+    controls.update();
+    
+    // Colisión estricta de la cámara contra las paredes/suelo/techo
+    if (camera.position.x > 14.8) camera.position.x = 14.8;
+    if (camera.position.x < -14.8) camera.position.x = -14.8;
+    if (camera.position.z > 24.8) camera.position.z = 24.8;
+    if (camera.position.z < -24.8) camera.position.z = -24.8;
+    if (camera.position.y > 9.8) camera.position.y = 9.8;
+    if (camera.position.y < -9.8) camera.position.y = -9.8;
+    
+    composer.render();
+}
+
+animate();

@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simulador de 15 Años</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=Lato:wght@300;400;700&display=swap" rel="stylesheet">
+    
+    <script>
+        window.addEventListener('error', function(event) {
+            const overlay = document.getElementById('error-overlay');
+            const msgBox = document.getElementById('error-message');
+            if (overlay && msgBox) {
+                msgBox.textContent = event.message + '\n' + (event.filename ? 'en ' + event.filename + ':' + event.lineno : '');
+                overlay.style.display = 'flex';
+            }
+        });
+        window.addEventListener('unhandledrejection', function(event) {
+            const overlay = document.getElementById('error-overlay');
+            const msgBox = document.getElementById('error-message');
+            if (overlay && msgBox) {
+                msgBox.textContent = 'Promesa rechazada: ' + (event.reason ? (event.reason.message || event.reason.toString()) : 'Error desconocido');
+                overlay.style.display = 'flex';
+            }
+        });
+    </script>
+    <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<div id="fps-counter" style="position:fixed;top:10px;left:10px;z-index:9999;background:rgba(0,0,0,0.6);color:#ffd700;font-family:monospace;font-size:14px;font-weight:bold;padding:4px 10px;border-radius:6px;pointer-events:none;display:none;text-shadow: 0 0 5px rgba(255,215,0,0.8);">FPS: --</div>
+    <!-- Loading Screen -->
+    <div id="loading-screen">
+        <div id="loading-slideshow-1" class="loading-bg"></div>
+        <div id="loading-slideshow-2" class="loading-bg"></div>
+        <canvas id="glitter-canvas" style="position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; z-index:9998;"></canvas>
+        <div class="loading-content">
+            <h1>Bienvenidos a mis 15 💛</h1>
+            <h2>Glaymar Estrada</h2>
+            <button id="btn-main-start" style="margin-top:20px;padding:15px 50px;font-size:1.5rem;font-weight:bold;font-family:sans-serif;background:transparent;color:#ffd700;border:2px solid #ffd700;border-radius:30px;cursor:pointer;text-transform:uppercase;box-shadow:0 0 15px rgba(255,215,0,0.4);transition:all 0.3s ease;" onmouseover="this.style.background='#ffd700';this.style.color='#3b0013'" onmouseout="this.style.background='transparent';this.style.color='#ffd700'">ENTRAR AL SIMULADOR</button>
+<div class="progress-bar-container" style="display:none;">
+                <div id="progress-bar"></div>
+            </div>
+            <p id="loading-text" style="display:none; margin-bottom: 5px;">Cargando la magia... 0%</p>
+<p id="loading-timer" style="display:none; color: #ffeb3b; font-size: 1rem; margin-bottom: 10px; font-weight: bold; text-shadow: 1px 1px 2px #000;">Tiempo de carga: 0s</p>
+<p id="loading-disclaimer" style="display:none; font-size: 0.8rem; color: #eee; max-width: 450px; margin: 0 auto; line-height: 1.4; text-shadow: 1px 1px 2px #000; text-align: center;">
+La carga puede demorar dependiendo del peso de los recursos 3D y puede variar según la velocidad de su red y las configuraciones de su dispositivo.
+</p>
+        </div>
+    </div>
+
+    <!-- Barra de botones superior (alineada con el menú) -->
+    <div id="top-btn-bar">
+        <button id="btn-fullscreen" title="Pantalla completa">&#x26F6;</button>
+        <button id="btn-toggle-menu">&#9776; Menú</button>
+    </div>
+
+    <!-- Panel de control -->
+    <div id="ui-menu" style="display: none;">
+
+        <div class="menu-header">
+            <h3>✦ &nbsp; Controles &nbsp; ✦</h3>
+        </div>
+
+        <!-- Modos especiales -->
+        <div class="menu-section">
+            <div class="section-label">Cámara & Baile</div>
+            <div id="special-modes">
+                <button id="btn-auto-dance"  class="toggle-btn">🎭 Auto-Baile</button>
+                <button id="btn-cinematic"   class="toggle-btn">🎬 Cámara Cinemática</button>
+            </div>
+        </div>
+
+        <!-- Rosas -->
+        <div class="menu-section">
+            <div class="section-label">Efectos</div>
+            <div id="special-modes" style="gap:7px; display:flex; flex-direction:column;">
+                <button id="btn-rose-rain"  class="toggle-btn">🌹 Lluvia de Rosas</button>
+                <button id="btn-rose-throw" class="toggle-btn">💐 Lanzar Rosas</button>
+            </div>
+        </div>
+
+        <!-- Grabar -->
+        <div class="menu-section" style="padding-bottom:4px;">
+            <button id="btn-record" class="toggle-btn">🎥 &nbsp;Grabar Video</button>
+        </div>
+
+        <!-- Reproductor -->
+        <div class="menu-section" id="music-player">
+            <div class="section-label">Música</div>
+            <div id="track-name">---</div>
+            <div class="music-controls">
+                <button id="btn-prev" class="music-btn">⏮</button>
+                <button id="btn-play" class="music-btn">&#9654;</button>
+                <button id="btn-next" class="music-btn">⏭</button>
+            </div>
+            <div class="volume-row">
+                <span class="vol-icon">🔈</span>
+                <input type="range" id="volume-slider" min="0" max="1" step="0.01" value="0.5">
+                <span class="vol-icon">🔊</span>
+            </div>
+            <audio id="bg-audio" src=""></audio>
+        </div>
+
+        <!-- Lista de animaciones -->
+        <div class="menu-section">
+            <div class="section-label">Animaciones — toca o presiona la tecla</div>
+            <ul id="anim-list">
+                <!-- Populated by JS -->
+            </ul>
+        </div>
+
+    </div>
+
+    
+
+    <script>
+        // Pantalla Completa
+        const btnFs = document.getElementById('btn-fullscreen');
+        if (btnFs) {
+            btnFs.addEventListener('click', () => {
+                if (!document.fullscreenElement) {
+                    document.documentElement.requestFullscreen().catch(err => console.warn('Fullscreen err:', err));
+                } else {
+                    document.exitFullscreen();
+                }
+            });
+            document.addEventListener('fullscreenchange', () => {
+                btnFs.innerHTML = document.fullscreenElement ? '✕' : '⛶';
+                btnFs.title = document.fullscreenElement ? 'Salir de pantalla completa' : 'Pantalla completa';
+            });
+        }
+    </script>
+
+    <script>
+        // Purpurina dorada en pantalla de carga
+        const cvs = document.getElementById('glitter-canvas');
+        if(cvs) {
+            const ctx = cvs.getContext('2d');
+            let w = cvs.width = window.innerWidth;
+            let h = cvs.height = window.innerHeight;
+            const parts = [];
+            for(let i=0; i<150; i++) {
+                parts.push({
+                    x: Math.random() * w, y: Math.random() * h,
+                    r: Math.random() * 1.5 + 0.5, a: Math.random() * Math.PI * 2,
+                    v: Math.random() * 0.5 + 0.2
+                });
+            }
+            function drawGlitt() {
+                const ls = document.getElementById('loading-screen');
+                if(!ls || ls.style.opacity === '0') return;
+                ctx.clearRect(0, 0, w, h);
+                ctx.fillStyle = '#ffd700';
+                parts.forEach(p => {
+                    p.y += p.v; p.a += 0.05;
+                    if(p.y > h) p.y = 0;
+                    ctx.globalAlpha = Math.abs(Math.sin(p.a)) * 0.8 + 0.2;
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, p.r, 0, Math.PI*2);
+                    ctx.fill();
+                });
+                requestAnimationFrame(drawGlitt);
+            }
+            drawGlitt();
+            window.addEventListener('resize', () => {
+                w = cvs.width = window.innerWidth;
+                h = cvs.height = window.innerHeight;
+            });
+        }
+    </script>
+    <!-- Tutorial Modal -->
+    <div id="tutorial-overlay">
+        <div class="tutorial-box">
+            <h2>¡Hola! Soy Glaymar ✨</h2>
+            <p>
+                Bienvenidos a mi simulador de 15 años. Aquí podrás ver mi vestido en detalle, 
+                hacer llover rosas, grabar videos y elegir la música que más te guste.
+            </p>
+            <p>
+                Abre el <strong>Menú (✦)</strong> arriba a la derecha para ver los controles, 
+                o toca la pantalla y arrastra para girar la cámara.
+            </p>
+            <button id="btn-start-tutorial" class="tutorial-btn">¡A Celebrar!</button>
+        </div>
+    </div>
+    <div id="watermark" style="position: fixed; bottom: 10px; left: 10px; font-family: 'Lato', sans-serif; font-size: 0.8rem; color: rgba(255, 255, 255, 0.6); z-index: 9000; pointer-events: none; text-shadow: 1px 1px 2px rgba(0,0,0,0.8);">
+        Creado por Selene Jimenez
+    </div>
+    <!-- Error Modal -->
+    <div id="error-overlay" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(10,4,18,0.9); backdrop-filter: blur(15px); z-index: 99999; display: none; justify-content: center; align-items: center; opacity: 1;">
+        <div class="tutorial-box" style="border: 1px solid rgba(255,50,50,0.6); box-shadow: 0 15px 50px rgba(0,0,0,0.9), 0 0 30px rgba(255,50,50,0.2);">
+            <h2 style="color: #ff5555; text-shadow: none;">¡Uy! Algo salió mal</h2>
+            <p id="error-message" style="font-family: monospace; font-size: 0.85rem; color: #ffaaaa; background: rgba(0,0,0,0.5); padding: 10px; border-radius: 6px; text-align: left; max-height: 150px; overflow-y: auto; word-wrap: break-word;">
+                Error details
+            </p>
+            <p style="font-size: 0.85rem; margin-top: 15px; color: #ccc;">
+                Por favor, recarga la página o intenta desde otro navegador/dispositivo.
+            </p>
+            <button onclick="document.getElementById('error-overlay').style.display='none'" class="tutorial-btn" style="background: linear-gradient(135deg, #8b0000, #ff4444); color: white; margin-top: 10px; box-shadow: none;">Cerrar</button>
+        </div>
+    </div>
+<script type="module" src="./main.js"></script>
+</body>
+</html>
